@@ -1,317 +1,357 @@
-# layout_evaluator.py 
-from typing import List, Tuple, Any, Dict, Optional
+# layout_evaluator.py
+from typing import List, Tuple, Any, Dict, Optional, Union
 from dotenv import load_dotenv
 import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
 import logging
 import json
 from datetime import datetime
-import runpy
 from enum import Enum
+import multiprocessing
+import queue
+import gc
 import io
-from contextlib import redirect_stdout
-from collections import Counter
+import runpy
+import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import redirect_stdout, redirect_stderr
 
-# --- Core Dependencies and Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
 logger = logging.getLogger(__name__)
 load_dotenv()
 PROJECT_PATH = Path(os.environ.get("PROJECT_PATH", Path(__file__).parent.resolve()))
 sys.path.insert(0, str(PROJECT_PATH))
 
-# Use a non-interactive backend for matplotlib to prevent GUI windows from appearing.
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-# --- Status and Data Classes ---
+try:
+    from matplotlib.contour import QuadContourSet, TriContourSet
+except ImportError:
+    try:
+        from matplotlib.contour import QuadContourSet
+        from matplotlib.tri import TriContourSet
+    except ImportError:
+        class TriContourSet: pass
+        class QuadContourSet: pass
+
+from matplotlib.collections import (
+    PathCollection, PolyCollection, QuadMesh, LineCollection
+)
+from matplotlib.container import BarContainer, ErrorbarContainer, StemContainer
+from matplotlib.quiver import Quiver
+from matplotlib.patches import Wedge
+
 class ExecutionStatus(Enum):
-    """Defines the possible outcomes of a script execution."""
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
 
 @dataclass
 class LayoutMetrics:
-    """Stores the evaluation results for layout comparison."""
     precision: float = 0.0
     recall: float = 0.0
     f1: float = 0.0
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     error_message: str = ""
 
-# --- Sandboxed Code Executor ---
-def _execute_code_runner(code_file_path: str) -> Tuple[bool, Optional[str]]:
-    """
-    Helper function to run a script in an isolated process, suppressing all standard output.
-    This is designed to be the target for the ProcessPoolExecutor.
-    """
-    import runpy
-    import matplotlib
-    import io
-    from contextlib import redirect_stdout
-
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    
-    # Suppress plot rendering and close all figures to save memory.
-    plt.show = lambda *args, **kwargs: None
-    plt.savefig = lambda *args, **kwargs: None
-    plt.close('all')
-    
-    output_buffer = io.StringIO()
+def _identify_ax_type(ax: plt.Axes) -> str:
+    """Robustly identifies the primary chart type within a single Axes."""
     try:
-        # Redirect all standard output to the buffer during execution.
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        return True, None
+        if ax.name == '3d':
+            if any(isinstance(c, (QuadContourSet, TriContourSet)) for c in ax.collections): return '3d_contour'
+            if any(isinstance(c, PathCollection) for c in ax.collections): return '3d_scatter'
+            if len(ax.lines) > 0: return '3d_line'
+            return '3d_plot'
+        if ax.name == 'polar': return 'radar'
+        if ax.containers:
+            for c in ax.containers:
+                if isinstance(c, BarContainer):
+                    try:
+                        if len(ax.get_yticks()) > len(ax.get_xticks()) and not ax.get_xaxis().get_label().get_text():
+                             return 'bar'
+                    except: pass
+                    return 'bar'
+                if isinstance(c, ErrorbarContainer): return 'errorbar'
+                if isinstance(c, StemContainer): return 'stem'
+        for c in ax.collections:
+            if isinstance(c, Quiver): return 'quiver'
+            if isinstance(c, (QuadContourSet, TriContourSet)): return 'contour'
+            if isinstance(c, QuadMesh): return 'heatmap'
+            if isinstance(c, PolyCollection):
+                 try:
+                     if len(c.get_paths()) > 0 and len(c.get_paths()[0].vertices) > 20: return 'violin' 
+                 except: pass
+                 return 'area'
+            if isinstance(c, PathCollection): return 'scatter'
+        if ax.images:
+            if not ax.axis('on') or (len(ax.get_xticks()) == 0): return 'wordcloud'
+            return 'heatmap'
+        for p in ax.patches:
+            if isinstance(p, Wedge): return 'pie'
+        if ax.lines:
+             if not ax.axis('on'): return 'graph'
+             return 'line'
     except Exception as e:
-        return False, f"Error during code execution: {e}"
-    finally:
-        plt.close('all')
+        return 'error'
+    return 'empty'
 
-def execute_code_and_get_figure(code_file_path: str, timeout: int = 60) -> Tuple[Optional[Figure], Optional[str]]:
-    """
-    Executes a plotting script with a timeout and returns the generated matplotlib figure.
-    All standard output from the script is suppressed.
-    """
-    # Phase 1: Run in a separate process to safely handle timeouts and fatal errors.
-    with ProcessPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_execute_code_runner, code_file_path)
+def _get_fuzzy_data_stats(ax: plt.Axes) -> Dict[str, float]:
+    raw_data_blobs = []
+    
+    try:
+        for line in ax.lines:
+            x, y = line.get_data()
+            if y is not None: raw_data_blobs.append(np.array(y))
+
+        for c in ax.containers:
+            if hasattr(c, 'datavalues') and c.datavalues is not None:
+                raw_data_blobs.append(np.array(c.datavalues))
+
+        for c in ax.collections:
+            offsets = c.get_offsets()
+            if offsets is not None and len(offsets) > 0:
+                raw_data_blobs.append(offsets.flatten())
+            elif isinstance(c, PolyCollection):
+                 for path in c.get_paths():
+                    if path.vertices is not None:
+                        raw_data_blobs.append(path.vertices.flatten())
+            if isinstance(c, Quiver):
+                 if c.U is not None: raw_data_blobs.append(c.U.flatten())
+
+        for img in ax.images:
+            arr = img.get_array()
+            if arr is not None:
+                 if np.ma.is_masked(arr): raw_data_blobs.append(arr.compressed())
+                 else: raw_data_blobs.append(np.array(arr).flatten())
+
+        if not ax.containers: 
+            for p in ax.patches:
+                if isinstance(p, Wedge):
+                    raw_data_blobs.append(np.array([p.theta2 - p.theta1]))
+                elif hasattr(p, 'get_height'):
+                    h = p.get_height()
+                    if h is not None: raw_data_blobs.append(np.array([h]))
+
+        full_data = []
+        for blob in raw_data_blobs:
+            if blob is None or blob.size == 0: continue
+            try:
+                valid = blob[np.isfinite(np.asanyarray(blob, dtype=float))]
+                if valid.size > 0:
+                    full_data.extend(valid.tolist())
+            except: continue
+            
+        if not full_data:
+            return None 
+
+        arr = np.array(full_data)
+        return {
+            "count": float(len(arr)),
+            "sum": float(np.sum(arr)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+            "max": float(np.max(arr))
+        }
+
+    except Exception:
+        return None
+
+def _extract_layout_data(fig: Figure, file_path: str = "") -> List[Dict[str, Any]]:
+    if "/graph" in str(file_path).replace("\\", "/"):
+
+        return [dict(nrows=1, ncols=1, row_start=0, row_end=0, col_start=0, col_end=0, type='graph', stats=None)]
+    
+    layout_info = []
+    try:
+        fig.canvas.draw()
+    except Exception: pass
+
+    for ax in fig.axes:
         try:
-            success, error_msg = future.result(timeout=timeout)
-            if not success:
-                return None, error_msg
-        except TimeoutError:
-            return None, f"Code execution timed out (> {timeout} seconds)"
-        except Exception as e:
-            return None, f"Executor encountered an unknown error: {e}"
+            spec = ax.get_subplotspec()
+            if spec is None: continue
+            gs = spec.get_gridspec()
+            nrows, ncols = gs.get_geometry()
+            row_start, row_end = spec.rowspan.start, spec.rowspan.stop - 1
+            col_start, col_end = spec.colspan.start, spec.colspan.stop - 1
+            
+            chart_type = _identify_ax_type(ax)
+            stats = _get_fuzzy_data_stats(ax) 
+            
+            layout_info.append(dict(
+                nrows=nrows, ncols=ncols, 
+                row_start=row_start, row_end=row_end, 
+                col_start=col_start, col_end=col_end,
+                type=chart_type,
+                stats=stats 
+            ))
+        except Exception: continue
+    return layout_info
 
-    plt.close('all')
-    
-    # Phase 2: If the first run was safe, run again locally to capture the figure.
-    output_buffer = io.StringIO()
-    try:
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        
-        fig_nums = plt.get_fignums()
-        if not fig_nums:
-            return None, "Code executed successfully but did not generate any Figure"
-        
-        # Return the most recently created figure.
-        return plt.figure(fig_nums[-1]), None
-    except Exception as e:
-        return None, f"Error while capturing Figure object: {e}"
-    finally:
-        plt.close('all')
-
-# --- Layout Evaluator ---
 class LayoutEvaluator:
-    """
-    Evaluates the subplot grid layout of matplotlib figures.
-    """
     def __init__(self) -> None:
         self.metrics = LayoutMetrics()
 
-    def __call__(self, gen_fig: Optional[Figure], gt_fig: Optional[Figure], gen_file_path: str, gt_file_path: str) -> LayoutMetrics:
-        """
-        Compares the layout of a generated figure against a ground-truth figure.
-        """
-        if gen_fig is None or gt_fig is None:
+    def __call__(self, gen_input: Any, gt_input: Any, gen_file_path: str = "", gt_file_path: str = "") -> LayoutMetrics:
+        if gen_input is None or gt_input is None:
             self.metrics.status = ExecutionStatus.FAILED
-            self.metrics.error_message = "Could not get a valid Figure object for comparison."
+            self.metrics.error_message = "Invalid input (None)"
             return self.metrics
+
         try:
-            generation_layouts = self._extract_layout_from_figure(gen_fig, gen_file_path)
-            gt_layouts = self._extract_layout_from_figure(gt_fig, gt_file_path)
-            self._calculate_metrics(generation_layouts, gt_layouts)
+            if hasattr(gen_input, 'canvas'): gen_layouts = _extract_layout_data(gen_input, gen_file_path)
+            else: gen_layouts = gen_input
+
+            if hasattr(gt_input, 'canvas'): gt_layouts = _extract_layout_data(gt_input, gt_file_path)
+            else: gt_layouts = gt_input
+
+            self._calculate_metrics(gen_layouts, gt_layouts)
         except Exception as e:
             logger.error(f"Error during layout evaluation: {e}", exc_info=True)
             self.metrics.status = ExecutionStatus.FAILED
             self.metrics.error_message = str(e)
         return self.metrics
 
-    def _extract_layout_from_figure(self, fig: Figure, file_path: str) -> List[Dict[str, int]]:
-        """
-        Extracts subplot grid layout information from a Figure object.
-        It inspects the SubplotSpec of each axis to determine the grid geometry.
-        """
-        # Special handling for graph plots which may not use a standard GridSpec.
-        if "/graph" in file_path:
-            return [dict(nrows=1, ncols=1, row_start=0, row_end=0, col_start=0, col_end=0)]
-        
-        layout_info = []
-        for ax in fig.axes:
-            spec = ax.get_subplotspec()
-            if spec is None: continue
+    def _is_fuzzy_match(self, layout1: Dict, layout2: Dict, is_single_plot: bool) -> bool:
 
-            gs = spec.get_gridspec()
-            nrows, ncols = gs.get_geometry()
-            row_start, row_end = spec.rowspan.start, spec.rowspan.stop - 1
-            col_start, col_end = spec.colspan.start, spec.colspan.stop - 1
-            
-            layout_info.append(dict(
-                nrows=nrows, ncols=ncols, 
-                row_start=row_start, row_end=row_end, 
-                col_start=col_start, col_end=col_end
-            ))
-        return layout_info
+        if (layout1['nrows'] != layout2['nrows'] or 
+            layout1['ncols'] != layout2['ncols'] or 
+            layout1['row_start'] != layout2['row_start'] or 
+            layout1['col_start'] != layout2['col_start']):
+            return False
 
-    def _calculate_metrics(self, generation_layouts: List[Dict], gt_layouts: List[Dict]) -> None:
-        """
-        Calculates precision, recall, and F1 score by comparing layout configurations.
-        """
-        if not generation_layouts and not gt_layouts:
-            self.metrics.precision = 1.0; self.metrics.recall = 1.0; self.metrics.f1 = 1.0
-            return
+        if is_single_plot:
+            return True
+
+        if layout1['type'] != layout2['type']:
+            return False
+
+        s1 = layout1.get('stats')
+        s2 = layout2.get('stats')
+
+        if s1 is None and s2 is None: return True
+
+        if s1 is None or s2 is None: return False
         
-        if not gt_layouts or not generation_layouts:
-            self.metrics.precision = 0.0; self.metrics.recall = 0.0; self.metrics.f1 = 0.0
-            return
+        if abs(s1['count'] - s2['count']) > max(2, s1['count'] * 0.05): return False
+
+        def is_close(a, b, rel_tol=0.05, abs_tol=1e-3):
+            return abs(a - b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
+
+        if not is_close(s1['mean'], s2['mean']): return False
+        if not is_close(s1['std'], s2['std']): return False
+        
+        return True
+
+    def _calculate_metrics(self, gen_layouts: List[Dict], gt_layouts: List[Dict]) -> None:
+        if not gen_layouts and not gt_layouts:
+            self.metrics.precision = 1.0; self.metrics.recall = 1.0; self.metrics.f1 = 1.0; return
+        if not gt_layouts or not gen_layouts:
+            self.metrics.precision = 0.0; self.metrics.recall = 0.0; self.metrics.f1 = 0.0; return
+
+        is_single_plot = (len(gen_layouts) == 1 and len(gt_layouts) == 1)
 
         n_correct = 0
         gt_layouts_copy = gt_layouts.copy()
-        for layout in generation_layouts:
-            if layout in gt_layouts_copy:
-                n_correct += 1
-                # Remove the matched layout to handle duplicates correctly.
-                gt_layouts_copy.remove(layout)
         
-        self.metrics.precision = n_correct / len(generation_layouts) if generation_layouts else 1.0
+        for g_item in gen_layouts:
+            match_found = False
+            for gt_item in gt_layouts_copy:
+                if self._is_fuzzy_match(g_item, gt_item, is_single_plot):
+                    match_found = True
+                    gt_layouts_copy.remove(gt_item)
+                    break
+            if match_found:
+                n_correct += 1
+        
+        self.metrics.precision = n_correct / len(gen_layouts) if gen_layouts else 1.0
         self.metrics.recall = n_correct / len(gt_layouts) if gt_layouts else 1.0
         
         if self.metrics.precision + self.metrics.recall > 0:
             self.metrics.f1 = 2 * self.metrics.precision * self.metrics.recall / (self.metrics.precision + self.metrics.recall)
-        else:
-            self.metrics.f1 = 0.0
 
-# --- Main Workflow and Parallel Processing ---
-def process_single_file(file_name: str, generation_dir: Path, gt_dir: Path) -> Tuple[str, LayoutMetrics]:
-    """
-    Processes a single pair of generated and ground-truth scripts.
-    """
-    logger.info(f"Processing: {file_name}...")
+def _worker_process(code_path: str, result_queue: multiprocessing.Queue):
+    try:
+        f = io.StringIO()
+        with redirect_stdout(f), redirect_stderr(f):
+            plt.close('all')
+            matplotlib.rc_file_defaults()
+            runpy.run_path(str(code_path), run_name='__main__')
+            fig_nums = plt.get_fignums()
+            if not fig_nums:
+                result_queue.put({"status": "error", "msg": "No figure produced"})
+                return
+            fig = plt.figure(fig_nums[-1])
+            layout_data = _extract_layout_data(fig, code_path)
+            result_queue.put({"status": "success", "data": layout_data})
+    except Exception as e:
+        result_queue.put({"status": "error", "msg": str(e)})
+    finally:
+        plt.close('all')
+        gc.collect()
+
+def execute_code_and_get_layout(code_file_path: str, timeout: int = 60):
+    if not os.path.exists(code_file_path): return None, "File not found"
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_worker_process, args=(code_file_path, q))
+    try:
+        p.start()
+        res = q.get(timeout=timeout)
+        p.join(timeout=1)
+        if res["status"] == "success": return res["data"], None
+        else: return None, res["msg"]
+    except queue.Empty:
+        p.terminate(); p.join()
+        return None, f"Execution timed out (> {timeout} seconds)"
+    except Exception as e:
+        if p.is_alive(): p.terminate()
+        return None, f"Executor error: {e}"
+
+def process_single_file_standalone(file_name: str, generation_dir: Path, gt_dir: Path):
     evaluator = LayoutEvaluator()
-    generation_file = generation_dir / file_name
-    gt_file = gt_dir / file_name
+    gen_data, gen_err = execute_code_and_get_layout(str(generation_dir / file_name))
+    gt_data, gt_err = execute_code_and_get_layout(str(gt_dir / file_name))
     
-    gen_fig, gen_err = execute_code_and_get_figure(str(generation_file))
-    gt_fig, gt_err = execute_code_and_get_figure(str(gt_file))
-    
-    metrics = evaluator(gen_fig, gt_fig, str(generation_file), str(gt_file))
-    
-    # Consolidate execution errors with evaluation metrics.
-    if gen_err or gt_err:
-        if metrics.status == ExecutionStatus.SUCCESS:
-            metrics.status = ExecutionStatus.FAILED
-        if "timed out" in str(gen_err).lower() or "timed out" in str(gt_err).lower():
-            metrics.status = ExecutionStatus.TIMEOUT
+    if gen_data is None or gt_data is None:
+        metrics = LayoutMetrics(status=ExecutionStatus.FAILED)
         metrics.error_message = f"GenErr: {gen_err}; GtErr: {gt_err}"
-        logger.warning(f"Failed to process {file_name}: {metrics.error_message}")
-    else:
-        logger.info(f"Finished {file_name} (P:{metrics.precision:.2f} R:{metrics.recall:.2f} F1:{metrics.f1:.2f})")
-        
-    return file_name, metrics
+        return file_name, metrics
+    
+    return file_name, evaluator(gen_data, gt_data)
 
-def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: Optional[str] = None, num_workers: Optional[int] = None) -> Dict[str, LayoutMetrics]:
-    """
-    Evaluates all matching Python scripts in two directories in parallel.
-    """
-    generation_path = Path(generation_dir)
+def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: str):
+    print(f"Running LayoutEvaluator (Fuzzy & Robust)...")
+    gen_path = Path(generation_dir)
     gt_path = Path(gt_dir)
-    
-    common_files = sorted(list(set(f.name for f in generation_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
-    
-    if not common_files:
-        logger.warning("No matching file pairs found in the specified directories."); return {}
-        
-    if num_workers is None:
-        num_workers = os.cpu_count()
-        
-    logger.info(f"Found {len(common_files)} file pairs to process using {num_workers} workers.")
+    common_files = sorted(list(set(f.name for f in gen_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
     
     all_results = {}
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        future_to_file = {executor.submit(process_single_file, fname, generation_path, gt_path): fname for fname in common_files}
+    with ProcessPoolExecutor() as executor:
+        future_to_file = {executor.submit(process_single_file_standalone, f, gen_path, gt_path): f for f in common_files}
         for future in as_completed(future_to_file):
-            file_name = future_to_file[future]
+            fname = future_to_file[future]
             try:
                 _, metrics = future.result()
-                all_results[file_name] = metrics
+                all_results[fname] = metrics
+                print(f"Processed {fname}: F1={metrics.f1:.2f}")
             except Exception as e:
-                logger.error(f"A critical error occurred while processing the future for {file_name}: {e}")
-                all_results[file_name] = LayoutMetrics(status=ExecutionStatus.FAILED, error_message=str(e))
-                
-    if output_file:
-        save_results_to_json(all_results, output_file)
-        
-    return all_results
+                print(f"Error {fname}: {e}")
 
-def save_results_to_json(results: Dict[str, LayoutMetrics], output_file: str) -> None:
-    """Saves the aggregated evaluation results to a JSON file."""
-    json_data = {
-        "evaluation_info": {
-            "timestamp": datetime.now().isoformat(),
-            "evaluator": "LayoutEvaluator"
-        },
-        "individual_results": []
-    }
-    
-    for file_name, metrics in sorted(results.items()):
-        json_data["individual_results"].append({
-            "file": file_name,
-            "status": metrics.status.value,
-            "precision": round(metrics.precision, 4),
-            "recall": round(metrics.recall, 4),
-            "f1": round(metrics.f1, 4),
-            "error_message": metrics.error_message
-        })
-        
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
-    logger.info(f"Evaluation results saved to: {output_file}")
-
-def main():
-    """Main entry point for the script."""
-    print("=" * 60)
-    print("Layout Evaluator")
-    
-    generation_dir = PROJECT_PATH / "generation_code"
-    gt_dir = PROJECT_PATH / "gt_code"
-    
-    if not generation_dir.exists() or not gt_dir.exists():
-        logger.error(f"Error: Please ensure 'generation_code' and 'gt_code' directories exist at: {PROJECT_PATH}")
-        return
-        
-    try:
-        results = batch_evaluate_directory(
-            generation_dir=str(generation_dir),
-            gt_dir=str(gt_dir),
-            output_file=str(PROJECT_PATH / "layout_evaluation_results.json"),
-            num_workers=os.cpu_count()
-        )
-        
-        if results:
-            print("\n" + "=" * 25 + " Evaluation Summary " + "=" * 25)
-            status_counts = Counter(m.status.value for m in results.values())
-            total = len(results)
-            print(f"Total files evaluated: {total}")
-            for status, count in status_counts.items():
-                print(f"  - {status.capitalize():<10}: {count:4d} files ({count/total:.1%})")
-            print("=" * 60)
-        else:
-            print("\nNo files were evaluated.")
-            
-    except Exception as e:
-        logger.error(f"Batch evaluation failed: {e}", exc_info=True)
+    with open(output_file, 'w') as f:
+        json.dump({k: v.f1 for k, v in all_results.items()}, f, indent=2)
+    print(f"Finished. Saved to {output_file}")
 
 if __name__ == "__main__":
-    main()
-
+    if sys.platform != 'linux':
+        multiprocessing.set_start_method('spawn', force=True)
+    
+    gen_dir = PROJECT_PATH / "generation_code"
+    gt_dir = PROJECT_PATH / "gt_code"
+    if gen_dir.exists():
+        batch_evaluate_directory(str(gen_dir), str(gt_dir), "layout_standalone.json")
 
