@@ -1,399 +1,445 @@
 import os
 import sys
 import json
-import time
 import logging
 import argparse
+import re
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
+from typing import Dict, Any, Optional, List
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 import pandas as pd
 import openai
 from dotenv import load_dotenv
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 
 # --- Configure logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
 )
-logger = logging.getLogger("API_CodeEvaluator_Strict")
+logger = logging.getLogger("API_CodeEvaluator_8Dim_Strict")
 
 # --- Load environment variables ---
 load_dotenv()
 
-# --- Configure API client ---
-try:
-    client = openai.OpenAI(
-        base_url=os.getenv('OPENAI_API_URL'),
-        api_key=os.getenv('OPENAI_API_KEY'),
-        timeout=float(os.getenv('OPENAI_TIMEOUT', 120.0)),
-        max_retries=int(os.getenv('OPENAI_MAX_RETRIES', 3))
-    )
-except Exception as e:
-    logger.error(f"Failed to initialize OpenAI client: {e}")
-    sys.exit(1)
-
 class ExecutionStatus:
     SUCCESS = "success"
     FAILED = "failed"
-    SKIPPED = "skipped"
 
-# --- System prompt for multi-step evaluation ---
 STRICT_SYSTEM_PROMPT = """
-You are a meticulous and strict expert Python data visualization analyst. Your task is to compare two Python plotting scripts and evaluate the visual similarity of their final outputs based on a SINGLE, specific dimension.
+You are a VERY STRICT Code-to-Visualization Auditor.
 
-Your analysis must be based **solely on the provided code**. Do not execute it. Your evaluation must be critical and detail-oriented.
+Your task is to evaluate the SIMILARITY of the FINAL RENDERED IMAGE
+between Ground Truth (GT) and Generated (Gen) Python visualization code,
+using ONLY STATIC CODE ANALYSIS.
+You MUST reason strictly from what the code will deterministically render.
 
-**Scoring Philosophy:** Assume a perfect score of 100, then **deduct points for every deviation** you find, no matter how minor. A score of 100 is reserved ONLY for scripts that produce visually indistinguishable plots.
+Your judgment target is:
+> The FINAL VISUAL OUTPUT AS SEEN BY A HUMAN VIEWER,
+not code structure, not style, not intent.
 
-You must return ONLY a single JSON object with two keys: "score" (an integer from 0 to 100) and "reason" (a concise, expert analysis in English). Do not include any other text in your response.
+--------------------------------------------------
+CORE PRINCIPLES (MANDATORY)
+--------------------------------------------------
+
+1. Judge ONLY by final rendered visual appearance.
+   - If two codes differ but render visually identical output → no deduction.
+   - If two codes look similar in intent but render differently → deduct.
+
+2. If the final rendered result CANNOT be determined with certainty
+   from static analysis (e.g., randomness, external state, implicit defaults),
+   you MUST deduct points.
+
+3. All scores use a DEDUCTIVE METHOD:
+   - Start at 100 points per dimension.
+   - Deduct strictly based on visual discrepancies.
+
+4. Be conservative:
+   - When in doubt → DEDUCT.
+   - Do NOT give benefit of the doubt.
+
+--------------------------------------------------
+DEDUCTION SEVERITY GUIDE
+--------------------------------------------------
+
+- -0 pts:
+  * Purely functional identity (e.g., `c='k'` vs `color='black'`)
+  * Parameter changes that provably do NOT affect final pixels
+
+- -20 to -40 pts:
+  * Minor but visible deviations
+    (linewidth, marker size, font size, minor text wording)
+
+- -50 to -80 pts:
+  * Clearly visible visual mismatches
+    (wrong color, missing legend, different axis limits, missing grid)
+
+- -100 pts:
+  * Fundamentally different visualization
+    (wrong chart type, wrong data, missing primary plot)
+
+--------------------------------------------------
+EVALUATION DIMENSIONS
+--------------------------------------------------
+
+1. DATA LOGIC (CRITICAL)
+   Evaluate whether the SAME DATA is visually presented.
+
+   - Consider:
+     * Raw values
+     * Ordering / sorting
+     * Filtering / slicing
+     * Aggregation (sum, mean, cumulative, stacked)
+     * Normalization / scaling
+     * Axis transforms (log, symlog)
+
+   - Question:
+     > Would a viewer perceive the same quantitative information?
+
+2. CHART TYPE & GEOMETRY(CRITICAL)
+   - Exact plotting primitive (`plot`, `scatter`, `bar`, `imshow`, `contour`, etc.)
+   - Same dimensionality (1D / 2D / heatmap / 3D)
+   - Same stacking / grouping / overlay logic
+
+3. COLOR & COLOR MAPPING (CRITICAL)
+   Judge FINAL COLORS, NOT parameter names.
+
+   - For single-color plots:
+     * Are the rendered colors visually identical?
+
+   - For colormaps:
+     * Same colormap family?
+     * Same direction (normal vs reversed)?
+     * Same normalization range (`vmin`, `vmax`)?
+     * Same discrete vs continuous mapping?
+
+   - If colors differ in the final image → deduct heavily.
+
+4. VISUAL PARAMETERS(CRITICAL)
+   - Line width
+   - Marker type & size
+   - Alpha / transparency
+   - Linestyle
+   - Edgecolor / facecolor
+
+5. LAYOUT & STRUCTURE(CRITICAL)
+   - Figure size & aspect ratio
+   - Subplot grid (`nrows`, `ncols`)
+   - Shared axes
+   - Spacing (`tight_layout`, margins)
+
+6. LEGEND(CRITICAL)
+   - Presence or absence
+   - Content text
+   - Order of entries
+   - Location (`loc`)
+   - Frame visibility
+
+7. GRID & AXES(CRITICAL)
+   - Grid on/off
+   - Which axis (x, y, both)
+   - Grid style (major/minor, linestyle)
+   - Axis limits and ticks
+
+8. TEXT CONTENT(CRITICAL)
+   - Title text (exact wording)
+   - Axis labels
+   - Annotations
+   - Font size & weight if visually impactful
+
+--------------------------------------------------
+OUTPUT FORMAT (JSON ONLY, NO EXTRA TEXT)
+--------------------------------------------------
+
+{
+  "dim_chart_type": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_data_similarity": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_visual_params": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_color_matching": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_layout_structure": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_legend_config": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_grid_config": {"score": 0-100, "reason": "brief, concrete"},
+  "dim_text_content": {"score": 0-100, "reason": "brief, concrete"}
+}
 """
 
-# --- Core API call function ---
-def _call_api_for_evaluation(
-    model: str,
-    gt_code: str,
-    generation_code: str,
-    prompt: str
-) -> Dict[str, Any]:
-    response_content = ""
+def extract_json_from_text(text: str) -> Dict[str, Any]:
+    """
+    Robustly extract JSON from text, handling Markdown code blocks.
+    """
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": STRICT_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"""
-                        **Ground Truth Code:**
-                        ```python
-                        {gt_code}
-                        ```
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1:
+            try:
+                return json.loads(text[start:end+1])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError("Could not parse JSON from response")
+@retry(
+    retry=retry_if_exception_type((
+        openai.APIConnectionError,
+        openai.RateLimitError,
+        openai.APIError,
+        openai.APITimeoutError
+    )),
+    wait=wait_random_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(6),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+def call_openai_with_retry(client: openai.OpenAI, model: str, gt_code: str, gen_code: str) -> Dict[str, Any]:
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": STRICT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"### GT CODE:\n{gt_code}\n\n### GEN CODE:\n{gen_code}"
+            }
+        ],
+        temperature=0.0,
+        response_format={"type": "json_object"}
+    )
+    content = completion.choices[0].message.content
+    return extract_json_from_text(content)
 
-                        **Generated Code:**
-                        ```python
-                        {generation_code}
-                        ```
-
-                        **Evaluation Dimension & Rules:**
-                        {prompt}
-                        """
-                }
-            ],
-            temperature=0.0,
-            response_format={"type": "json_object"}
-        )
-        response_content = completion.choices[0].message.content
-        return json.loads(response_content)
-    except json.JSONDecodeError as e:
-        logger.error(f"Model {model} returned invalid JSON: {e}\nRaw Response: {response_content}", exc_info=False)
-        return {"score": 0, "reason": f"API returned invalid JSON: {e}"}
-    except Exception as e:
-        logger.error(f"Error calling model {model} for evaluation: {e}", exc_info=False)
-        return {"score": 0, "reason": f"API call failed: {e}"}
-
-# --- Worker function for processing a single file pair ---
-def evaluate_and_save_single_file_api(
+def evaluate_single_file_8dim(
     gen_file_path: Path,
     gt_file_path: Path,
-    evaluator_configs: Dict[str, Dict],
     weights: Dict[str, float],
     results_dir: Path,
-    model_name: str
+    model_name: str,
+    api_key: str,
+    base_url: str
 ) -> Optional[Dict[str, Any]]:
     file_name = gen_file_path.name
     
-    def read_code_file(path: Path) -> str:
-        try: return path.read_text(encoding='utf-8')
-        except UnicodeDecodeError: return path.read_text(encoding='gbk')
-
+    output_path = results_dir / f"{gen_file_path.stem}_api_report.json"
+    if output_path.exists() and output_path.stat().st_size > 0:
+        try:
+            with open(output_path, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+                if 'overall_score' in existing_data:
+                    return {
+                        "file_name": file_name,
+                        "overall_score": existing_data['overall_score'],
+                        "status": ExecutionStatus.SUCCESS,
+                        "skipped": True
+                    }
+        except:
+            pass 
     try:
-        gt_code_content = read_code_file(gt_file_path)
-        gen_code_content = read_code_file(gen_file_path)
+        gt_content = gt_file_path.read_text(encoding='utf-8')
+    except:
+        gt_content = gt_file_path.read_text(encoding='gbk', errors='ignore')
+        
+    try:
+        gen_content = gen_file_path.read_text(encoding='utf-8')
+    except:
+        gen_content = gen_file_path.read_text(encoding='gbk', errors='ignore')
+
+    logger.info(f"Evaluating: {file_name}")
+    
+    try:
+        client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=60.0,
+            max_retries=0 
+        )
     except Exception as e:
-        logger.warning(f"Failed to read file pair for {file_name}, skipping: {e}")
+        logger.error(f"Client Init Error: {e}")
         return None
 
-    logger.info(f"Starting evaluation for: {file_name}")
-    
+    try:
+        api_result = call_openai_with_retry(client, model_name, gt_content, gen_content)
+        api_status = ExecutionStatus.SUCCESS
+    except Exception as e:
+        logger.error(f"FATAL API Error for {file_name}: {e}")
+        api_result = {}
+        api_status = ExecutionStatus.FAILED
+
     file_results = {}
+    overall_score = 0.0
     
-    with ThreadPoolExecutor(max_workers=len(evaluator_configs)) as executor:
-        future_to_dim = {
-            executor.submit(_call_api_for_evaluation, model_name, gt_code_content, gen_code_content, config['prompt']): dim_name
-            for dim_name, config in evaluator_configs.items()
-        }
-        for future in as_completed(future_to_dim):
-            dim_name = future_to_dim[future]
-            result = future.result() # result() will propagate exceptions from the thread
-            score = result.get('score')
-            reason = result.get('reason', 'N/A')
-            standardized_score = float(score) / 100.0 if score is not None and isinstance(score, (int, float)) else 0.0
+    expected_dims = [
+        'dim_chart_type', 'dim_data_similarity', 
+        'dim_visual_params', 'dim_color_matching',
+        'dim_layout_structure', 'dim_legend_config', 
+        'dim_grid_config', 'dim_text_content'
+    ]
+
+    if api_status == ExecutionStatus.SUCCESS and api_result:
+        for dim in expected_dims:
+            dim_data = api_result.get(dim, {})
+            score = float(dim_data.get('score', 0))
+            reason = dim_data.get('reason', "No reason provided")
             
-            file_results[dim_name] = {
-                "status": ExecutionStatus.SUCCESS if score is not None else ExecutionStatus.FAILED,
-                "score": standardized_score,
+            file_results[dim] = {
+                "status": ExecutionStatus.SUCCESS,
+                "score": score,
                 "reason": reason
             }
-
-    overall_score = 0.0
-    total_weight_for_file = 0.0
-    for dim_name, result in file_results.items():
-        if result['status'] == ExecutionStatus.SU
-        CCESS:
-            weight = weights.get(dim_name, 0)
-            overall_score += result['score'] * weight
-            total_weight_for_file += weight
-    
-    if total_weight_for_file > 0:
-        overall_score /= total_weight_for_file
-
+            overall_score += score * weights.get(dim, 0.0)
+    else:
+        for dim in expected_dims:
+            file_results[dim] = {
+                "status": ExecutionStatus.FAILED,
+                "score": 0.0,
+                "reason": "API execution failed"
+            }
+            
     file_results['overall_score'] = overall_score
-    
-    output_path = results_dir / f"{gen_file_path.stem}_api_report.json"
+    file_results['status'] = api_status
+
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(file_results, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"Failed to write results to {output_path}: {e}")
+        logger.error(f"Failed to save details {output_path}: {e}")
 
-    summary_data = {"file_name": file_name, "overall_score": overall_score}
-    for dim_name, result in file_results.items():
-        if isinstance(result, dict):
-            summary_data[f"{dim_name}_score"] = result.get('score', 0.0)
-            summary_data[f"{dim_name}_status"] = result.get('status')
-
-    logger.info(f"Finished evaluation for: {file_name}")
+    summary_data = {"file_name": file_name, "overall_score": overall_score, "status": api_status}
+    for k, v in file_results.items():
+        if isinstance(v, dict):
+            summary_data[f"{k}_score"] = v.get('score', 0.0)
+            summary_data[f"{k}_status"] = v.get('status')
+            
     return summary_data
 
-
 class APIBasedCodeEvaluator:
-    def __init__(self, weights: Optional[Dict[str, float]] = None):
-        self.evaluator_configs = {
-            'data_handling_and_transformation': { 'prompt': """
-                Critically evaluate the DATA SOURCE and its TRANSFORMATION.
-                - Focus on: How the numerical data passed to the plotting function is generated.
-                - Check: Hardcoded lists/arrays, `pandas` or `numpy` array creation (e.g., `np.linspace`), data filtering (`df[...]`), mathematical operations (`np.sin(x)`, `df['a'] * 100`), and data aggregation.
+    def __init__(self):
+        self.weights = {
+            'dim_chart_type': 0.1,
+            'dim_data_similarity': 0.2,
+            'dim_visual_params': 0.1,
+            'dim_color_matching': 0.2,
+            'dim_layout_structure': 0.1,
+            'dim_legend_config': 0.1,
+            'dim_grid_config': 0.1,
+            'dim_text_content': 0.1
+        }
+        
+        # Verify normalization
+        total = sum(self.weights.values())
+        if not (0.99 < total < 1.01):
+            self.weights = {k: v/total for k, v in self.weights.items()}
 
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** Data generation and transformations are functionally identical (e.g., `[1, 2, 3]` vs `np.array([1, 2, 3])`).
-                - **-5 points:** Trivial differences in floating-point precision that are visually unnoticeable (e.g., `np.pi` vs `3.14159`).
-                - **-25 points:** Different data filtering or selection that results in a subset or different ordering of the same underlying data.
-                - **-50 points:** A different mathematical transformation is applied to the same base data (e.g., `np.sin(x)` vs `np.cos(x)`).
-                - **-75 points:** The fundamental data sources are different (e.g., plotting `df['col_A']` vs `df['col_B']`).
-                - **-100 points:** Data is completely unrelated in source, shape, and scale.
-                """, 'weight': 0.20 },
-            'chart_type_and_mapping': { 'prompt': """
-                Critically evaluate the CORE CHART TYPE and DATA-TO-VISUALS MAPPING.
-                - Focus on: The primary plotting function call (e.g., `plt.plot`, `ax.bar`, `sns.heatmap`).
-                - Check: Which variables are mapped to which axes (e.g., `x=df['time']`, `y=df['value']`) and other visual properties (`size=`, `hue=`).
-
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** The exact same plotting function is used with the same data-to-axis mappings.
-                - **-15 points:** A visually similar plot type is used (e.g., `plt.plot()` vs `plt.scatter()`).
-                - **-50 points:** A different plot type is used, but it's still plausible for the data (e.g., `plt.bar()` vs `plt.plot()` for time series). The core data variables on the axes are the same.
-                - **-75 points:** Key data mappings are swapped or incorrect (e.g., x and y axes are flipped; `x='sales', y='time'` vs `x='time', y='sales'`).
-                - **-100 points:** A fundamentally different and inappropriate chart type is used (e.g., `plt.pie()` vs `sns.lineplot()`).
-                """, 'weight': 0.25 },
-            'visual_aesthetics': { 'prompt': """
-                Critically evaluate the VISUAL AESTHETICS like colors, markers, and line styles.
-                - Focus on: Explicitly set styling arguments.
-                - Check: `color`, `linestyle` (or `ls`), `linewidth` (or `lw`), `marker`, `markersize`, `alpha`, `cmap` (for heatmaps/scatter), `palette` (for seaborn).
-
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** All explicit style arguments are identical.
-                - **-10 points:** A minor style attribute is different (e.g., `linewidth=1.5` vs `linewidth=2.0`, or `marker='o'` vs `marker='x'`).
-                - **-30 points:** The primary color is different (e.g., `color='blue'` vs `color='green'`). Or, one uses a default color while the other specifies one.
-                - **-50 points:** Multiple style attributes are different (e.g., color and linestyle).
-                - **-75 points:** The overall aesthetic is completely different (e.g., a solid blue line vs a transparent, dashed red line with markers).
-                """, 'weight': 0.20 },
-            'labels_titles_and_legend': { 'prompt': """
-                Critically evaluate all TEXTUAL ELEMENTS: labels, titles, and legends.
-                - Focus on: The content and presence of all text.
-                - Check: `ax.set_title()`, `ax.set_xlabel()`, `ax.set_ylabel()`, `fig.suptitle()`, and the `label` argument in plotting calls used by `ax.legend()`.
-
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** All text elements are present and have identical content.
-                - **-5 points:** Minor, non-substantive differences exist (e.g., "Sales Data" vs "Sales data", or a minor typo).
-                - **-20 points:** A text element is present in both, but the content is substantively different (e.g., "Sales in 2023" vs "Profit in 2024").
-                - **-40 points:** A key text element is missing in one script (e.g., one has a title, the other does not).
-                - **-60 points:** Multiple key text elements are missing or incorrect.
-                - **-100 points:** No text elements are present in one or both scripts.
-                """, 'weight': 0.15 },
-            'figure_layout_and_axes': { 'prompt': """
-                Critically evaluate the FIGURE LAYOUT and AXES configuration.
-                - Focus on: The overall canvas, subplot structure, and axis properties.
-                - Check: `plt.figure(figsize=...)`, `plt.subplots()`, axis limits (`ax.set_xlim`, `ax.set_ylim`), axis scales (`ax.set_xscale`), and axis direction (`ax.invert_yaxis()`).
-
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** Figure size, subplot structure, limits, and scales are all identical.
-                - **-10 points:** Figure size is different, but the aspect ratio is similar.
-                - **-25 points:** Axis limits are different, but the data range shown is largely the same.
-                - **-50 points:** Axis scales are different (e.g., `linear` vs `log`). This is a major visual change.
-                - **-75 points:** The subplot structure is different (e.g., `subplots(1, 2)` vs `subplots(2, 1)`).
-                - **-100 points:** Completely different layouts (e.g., single plot vs. a complex grid of subplots).
-                """, 'weight': 0.15 },
-            'auxiliary_elements_and_ticks': { 'prompt': """
-                Critically evaluate AUXILIARY elements, grid, spines, and ticks.
-                - Focus on: Non-data visual elements that provide context or structure.
-                - Check: `ax.grid()`, `ax.axhline()`, `ax.axvspan()`, `ax.spines[...]`, `ax.tick_params()`, and explicit tick setting (`ax.set_xticks`).
-
-                **Scoring Rubric (Start at 100, deduct points):**
-                - **-0 points:** All auxiliary elements and tick configurations are identical.
-                - **-15 points:** An element is present in both but with different styling (e.g., a solid grid vs a dashed grid). Or, tick label formatting differs.
-                - **-30 points:** An important element is present in one but missing in the other (e.g., one script calls `ax.grid(True)` and the other does not).
-                - **-50 points:** A major contextual element is missing (e.g., a crucial `ax.axhline(y=0, ...)` that indicates a baseline). Or, spines are hidden in one but not the other.
-                - **-75 points:** Major differences in tick locations (e.g., `xticks` are explicitly set to different values).
-                """, 'weight': 0.05 }
-        } # NOTE: Prompts truncated for brevity. Use your full prompts here.
-
-        self.weights = {dim: config['weight'] for dim, config in self.evaluator_configs.items()}
-        if weights is not None:
-            self.weights.update(weights)
-        total_weight = sum(self.weights.values())
-        if not (0.999 < total_weight < 1.001):
-            logger.warning(f"Weights do not sum to 1 (current sum: {total_weight:.4f}). Normalizing weights.")
-            self.weights = {dim: w / total_weight for dim, w in self.weights.items()}
-
-    def _generate_summary_report(self, summary_data_list: List[Dict], generation_dir: str, gt_json_path: str, output_path: str, model_name: str):
-        if not summary_data_list:
-            logger.warning("No data available to generate a summary report.")
-            return
-
+    def _generate_summary_report(self, summary_data_list, gen_dir, gt_json, output_path, model_name):
+        if not summary_data_list: return
+        
         df = pd.DataFrame(summary_data_list)
         
-        avg_scores_by_dimension = {}
-        for dim_name in self.weights.keys():
-            score_col = f'{dim_name}_score'
-            status_col = f'{dim_name}_status'
-            if score_col in df.columns and status_col in df.columns:
-                successful_scores = df[df[status_col] == ExecutionStatus.SUCCESS][score_col]
-                avg_scores_by_dimension[dim_name] = successful_scores.astype(float).mean() if not successful_scores.empty else 0.0
-
-        successful_evaluations = len(df[df['overall_score'] > 0])
-        total_files_found = len(df)
-        
-        summary = {
-            "total_files_found": total_files_found,
-            "successful_evaluations": successful_evaluations,
-            "average_overall_score": df['overall_score'].astype(float).mean() if 'overall_score' in df.columns and not df.empty else 0.0,
-            "average_scores_by_dimension": avg_scores_by_dimension,
-            "weights_used": self.weights
-        }
+        avg_scores = {}
+        for dim in self.weights.keys():
+            col = f'{dim}_score'
+            if col in df.columns:
+                # Only count successful runs
+                vals = df[df.get(f'{dim}_status', ExecutionStatus.FAILED) == ExecutionStatus.SUCCESS][col]
+                avg_scores[dim] = vals.mean() if not vals.empty else 0.0
 
         final_report = {
             "report_info": {
                 "timestamp": datetime.now().isoformat(),
-                "generation_directory": str(generation_dir),
-                "gt_json_file": str(gt_json_path),
-                "evaluator": "APIBasedCodeEvaluator_StrictMultiStep_V2",
-                "model_used": model_name
+                "evaluator": "Strict_8Dim_Robust",
+                "model": model_name
             },
-            "summary_statistics": summary,
+            "summary_statistics": {
+                "total_files": len(df),
+                "successful": len(df[df['status'] == ExecutionStatus.SUCCESS]) if 'status' in df else 0,
+                "avg_overall_score": df['overall_score'].mean() if not df.empty else 0.0,
+                "avg_dim_scores": avg_scores
+            },
             "individual_file_results": df.to_dict('records')
         }
 
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(final_report, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Summary report generated successfully: {output_path}")
-        if summary:
-            avg_score = summary.get('average_overall_score', 0.0)
-            logger.info(f"Average overall score for model {model_name}: {avg_score:.4f}")
-            if total_files_found > 0:
-                success_rate = (successful_evaluations / total_files_found) * 100
-                logger.info(f"Evaluation success rate: {successful_evaluations} / {total_files_found} ({success_rate:.2f}%)")
-            else:
-                logger.info("Evaluation success rate: 0 / 0 (0.00%)")
-
-    def evaluate_and_report(
-        self,
-        generation_dir: str,
-        gt_json_path: str,
-        summary_json_path: str,
-        details_dir: str,
-        model_name: str,
-        num_workers: Optional[int] = None
-    ):
-        gen_path = Path(generation_dir)
-        gt_json = Path(gt_json_path)
-        summary_output_path = Path(summary_json_path)
-        results_dir = Path(details_dir)
-        
         try:
-            with open(gt_json, 'r', encoding='utf-8') as f:
-                gt_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Could not read or parse the Ground-Truth JSON file: {gt_json}. Error: {e}")
-            return
-        
-        gt_base_path = gt_json.parent
-        gt_map = { Path(item['GT code']).name: gt_base_path / item['GT code'] for item in gt_data if 'GT code' in item }
-        gen_files = {f.name: f for f in gen_path.glob("*.py")}
-        
-        tasks: List[Tuple[Path, Path]] = []
-        for gen_name, gen_file_path in gen_files.items():
-            if gen_name in gt_map:
-                tasks.append((gen_file_path, gt_map[gen_name]))
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(final_report, f, indent=2, ensure_ascii=False)
+            logger.info(f"Summary Report Saved: {output_path}")
+        except Exception as e:
+            logger.error(f"Summary Save Error: {e}")
 
-        if not tasks:
-            logger.error(f"No common .py files found between {gen_path.name} and {gt_json.name}. Aborting evaluation.")
-            return
-
+    def evaluate_and_report(self, gen_dir, gt_json, summary_path, details_dir, model_name, workers, api_key):
+        gen_path = Path(gen_dir)
+        results_dir = Path(details_dir)
         results_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"Found {len(tasks)} common files to evaluate.")
-        logger.info(f"Individual file reports will be saved to: {results_dir}")
-        logger.info(f"Final summary report will be saved to: {summary_output_path}")
+        # Load GT Map
+        try:
+            with open(gt_json, 'r') as f:
+                gt_list = json.load(f)
+            gt_base = Path(gt_json).parent
+            gt_map = {Path(i['GT code']).name: gt_base / i['GT code'] for i in gt_list if 'GT code' in i}
+        except Exception as e:
+            logger.error(f"GT Load Error: {e}")
+            sys.exit(1)
+
+        # Find Tasks
+        tasks = []
+        for f in gen_path.glob("*.py"):
+            if f.name in gt_map:
+                tasks.append((f, gt_map[f.name]))
         
+        if not tasks:
+            logger.warning("No tasks found.")
+            return
+
+        logger.info(f"Starting {len(tasks)} evaluations with {workers} workers.")
+        
+        # Get Base URL
+        base_url = os.getenv('OPENAI_API_URL', "https://api.openai.com/v1")
+
         summary_data_list = []
-        
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            future_to_file = {
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
                 executor.submit(
-                    evaluate_and_save_single_file_api, 
-                    gen_p, gt_p, self.evaluator_configs, self.weights, results_dir, model_name
-                ): gen_p.name
-                for gen_p, gt_p in tasks
+                    evaluate_single_file_8dim, 
+                    gen, gt, self.weights, results_dir, model_name, api_key, base_url
+                ): gen.name for gen, gt in tasks
             }
-            for future in as_completed(future_to_file):
-                try:
-                    summary_data = future.result()
-                    if summary_data:
-                        summary_data_list.append(summary_data)
-                except Exception as e:
-                    file_name = future_to_file[future]
-                    logger.error(f"A critical error occurred while processing the future for file {file_name}: {e}", exc_info=True)
+            
+            for future in as_completed(futures):
+                res = future.result()
+                if res: summary_data_list.append(res)
 
-        self._generate_summary_report(
-            summary_data_list, generation_dir, gt_json_path, str(summary_output_path), model_name
-        )
-
+        self._generate_summary_report(summary_data_list, gen_dir, gt_json, summary_path, model_name)
 
 def main():
-    parser = argparse.ArgumentParser(description="A strict, multi-step code evaluator using Large Language Models.")
-    parser.add_argument('--gen-dir', type=str, required=True, help="Path to the directory containing generated code files.")
-    parser.add_argument('--gt-json', type=str, required=True, help="Path to the JSON file with Ground-Truth code paths.")
-    parser.add_argument('--summary-json-path', type=str, required=True, help="Full output path for the final summary JSON report.")
-    parser.add_argument('--details-dir', type=str, required=True, help="Directory to store detailed reports for each file.")
-    parser.add_argument('--model-name', type=str, required=True, help="Name of the API model to use (e.g., 'gpt-4o').")
-    parser.add_argument('--workers', type=int, default=4, help="Number of worker processes for parallel execution.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gen-dir', required=True)
+    parser.add_argument('--gt-json', required=True)
+    parser.add_argument('--summary-json-path', required=True)
+    parser.add_argument('--details-dir', required=True)
+    parser.add_argument('--model-name', required=True)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--api-key', type=str, required=True, help="API Key from Bash script")
+    
     args = parser.parse_args()
+    
+    if not args.api_key:
+        logger.error("API Key missing.")
+        sys.exit(1)
 
     evaluator = APIBasedCodeEvaluator()
-    print("\n" + "="*30 + " Starting Strict Multi-Step API Evaluation " + "="*30)
     evaluator.evaluate_and_report(
-        generation_dir=args.gen_dir,
-        gt_json_path=args.gt_json,
-        summary_json_path=args.summary_json_path,
-        details_dir=args.details_dir,
-        model_name=args.model_name,
-        num_workers=args.workers
+        args.gen_dir, args.gt_json, args.summary_json_path, 
+        args.details_dir, args.model_name, args.workers, args.api_key
     )
-    print(f"\nEvaluation complete!")
-
 
 if __name__ == "__main__":
     main()
-
