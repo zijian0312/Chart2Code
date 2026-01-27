@@ -140,7 +140,8 @@ def evaluate_and_save_single_file_api(
     overall_score = 0.0
     total_weight_for_file = 0.0
     for dim_name, result in file_results.items():
-        if result['status'] == ExecutionStatus.SUCCESS:
+        if result['status'] == ExecutionStatus.SU
+        CCESS:
             weight = weights.get(dim_name, 0)
             overall_score += result['score'] * weight
             total_weight_for_file += weight
