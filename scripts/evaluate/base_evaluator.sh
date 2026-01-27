@@ -40,7 +40,7 @@ fi
 DEFAULT_EXECUTE_RESULTS_DIR="${PROJECT_ROOT_DIR}/Evaluation/execute_results"
 GT_DATA_DIR="${PROJECT_ROOT_DIR}/data"
 EVALUATION_RESULTS_DIR="${PROJECT_ROOT_DIR}/Evaluation/evaluation_results"
-PYTHON_EVALUATOR_SCRIPT_FULLPATH="${PROJECT_ROOT_DIR}/Evaluation/srcs2/base_evaluator.py"
+PYTHON_EVALUATOR_SCRIPT_FULLPATH="${PROJECT_ROOT_DIR}/Evaluation/srcs/base_evaluator.py"
 
 if [ ${#SOURCE_DIRS_INPUT[@]} -eq 0 ]; then
     SOURCE_DIRS_INPUT=("${DEFAULT_EXECUTE_RESULTS_DIR}")
