@@ -1,317 +1,306 @@
 # grid_evaluator.py 
-from typing import List, Tuple, Any, Dict, Optional
+from typing import List, Tuple, Any, Dict, Optional, Union
 from dotenv import load_dotenv
 import os
 import sys
 from pathlib import Path
-from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
+from dataclasses import dataclass, field, asdict
 import logging
 import json
 from datetime import datetime
-import runpy
 from enum import Enum
 import io
-from contextlib import redirect_stdout
-from collections import Counter
+import multiprocessing
+import queue
+import gc
+import runpy
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import redirect_stdout, redirect_stderr
 
-# --- Core Dependencies and Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
 logger = logging.getLogger(__name__)
 load_dotenv()
 PROJECT_PATH = Path(os.environ.get("PROJECT_PATH", Path(__file__).parent.resolve()))
 sys.path.insert(0, str(PROJECT_PATH))
 
-# Use a non-interactive backend for matplotlib to prevent GUI windows from appearing.
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from matplotlib.colors import to_hex
 
-# --- Status and Data Classes ---
+def robust_to_hex(color):
+    try:
+        if color is None: return None
+        return to_hex(color, keep_alpha=False).upper()
+    except Exception:
+        return None
+
 class ExecutionStatus(Enum):
-    """Defines the possible outcomes of a script execution."""
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
 
 @dataclass
+class GridStyle:
+    visible: bool = False
+    color: Optional[str] = None
+    linestyle: Optional[str] = None
+    linewidth: Optional[float] = None
+    alpha: Optional[float] = None
+
+@dataclass
+class GridConfig:
+    x_grid: GridStyle = field(default_factory=GridStyle)
+    y_grid: GridStyle = field(default_factory=GridStyle)
+    z_grid: Optional[GridStyle] = None 
+
+@dataclass
 class GridMetrics:
-    """Stores the evaluation results for grid comparison."""
     precision: float = 0.0
     recall: float = 0.0
     f1: float = 0.0
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     error_message: str = ""
 
-# --- Sandboxed Code Executor ---
-def _execute_code_runner(code_file_path: str) -> Tuple[bool, Optional[str]]:
-    """
-    Helper function to run a script in an isolated process, suppressing all standard output.
-    This is designed to be the target for the ProcessPoolExecutor.
-    """
-    import runpy
-    import matplotlib
-    import io
-    from contextlib import redirect_stdout
+def _get_grid_style(lines) -> GridStyle:
+    visible_lines = [line for line in lines if line.get_visible()]
+    
+    if not visible_lines:
+        return GridStyle(visible=False)
 
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    
-    # Suppress plot rendering and close all figures to save memory.
-    plt.show = lambda *args, **kwargs: None
-    plt.savefig = lambda *args, **kwargs: None
-    plt.close('all')
-    
-    # Create a buffer to swallow any print statements.
-    output_buffer = io.StringIO()
-    
+    sample = visible_lines[0]
+    return GridStyle(
+        visible=True,
+        color=robust_to_hex(sample.get_color()),
+        linestyle=sample.get_linestyle(),
+        linewidth=float(sample.get_linewidth()),
+        alpha=sample.get_alpha() if sample.get_alpha() is not None else 1.0
+    )
+
+def _extract_grids_from_figure(fig: Figure) -> List[GridConfig]:
+    grids = []
     try:
-        # Redirect all standard output to the buffer during execution.
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        return True, None
+        fig.canvas.draw()
     except Exception as e:
-        return False, f"Error during code execution: {e}"
-    finally:
-        plt.close('all')
+        logger.debug(f"Canvas draw warning: {e}")
 
-def execute_code_and_get_figure(code_file_path: str, timeout: int = 60) -> Tuple[Optional[Figure], Optional[str]]:
-    """
-    Executes a plotting script with a timeout and returns the generated matplotlib figure.
-    """
-    # Phase 1: Run in a separate process to check for hangs or fatal errors.
-    with ProcessPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_execute_code_runner, code_file_path)
+    for ax in fig.axes:
         try:
-            success, error_msg = future.result(timeout=timeout)
-            if not success:
-                return None, error_msg
-        except TimeoutError:
-            return None, f"Code execution timed out (> {timeout} seconds)"
+            x_style = _get_grid_style(ax.get_xgridlines())
+            y_style = _get_grid_style(ax.get_ygridlines())
+
+            z_style = None
+            if hasattr(ax, 'zaxis'):
+                try:
+                    if hasattr(ax, 'get_zgridlines'):
+                        z_style = _get_grid_style(ax.get_zgridlines())
+                    else:
+                        z_style = GridStyle(visible=False)
+                except Exception:
+                    z_style = GridStyle(visible=False)
+            is_visible = x_style.visible or y_style.visible or (z_style and z_style.visible)
+            
+            if is_visible:
+                grids.append(GridConfig(x_grid=x_style, y_grid=y_style, z_grid=z_style))
         except Exception as e:
-            return None, f"Executor encountered an unknown error: {e}"
+            logger.warning(f"Error extracting grid from axis: {e}")
+            continue
+            
+    return grids
 
-    plt.close('all')
-    
-    # Phase 2: If the first run was safe, run again locally to capture the figure.
-    output_buffer = io.StringIO()
-    try:
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        
-        fig_nums = plt.get_fignums()
-        if not fig_nums:
-            return None, "Code executed successfully but did not generate any Figure"
-        
-        # Return the most recently created figure.
-        return plt.figure(fig_nums[-1]), None
-    except Exception as e:
-        return None, f"Error while capturing Figure object: {e}"
-    finally:
-        plt.close('all')
-
-# --- Grid Evaluator ---
 class GridEvaluator:
-    """
-    Evaluates the presence and state of grid lines in matplotlib figures.
-    """
     def __init__(self) -> None:
         self.metrics = GridMetrics()
 
-    def __call__(self, gen_fig: Optional[Figure], gt_fig: Optional[Figure]) -> GridMetrics:
-        """
-        Compares the grid lines of a generated figure against a ground-truth figure.
-        """
-        if gen_fig is None or gt_fig is None:
+    def __call__(self, gen_input: Any, gt_input: Any) -> GridMetrics:
+        if gen_input is None or gt_input is None:
             self.metrics.status = ExecutionStatus.FAILED
-            self.metrics.error_message = "Could not get a valid Figure object for comparison."
+            self.metrics.error_message = "Invalid input (None)"
             return self.metrics
+        
         try:
-            generation_grids = self._extract_grids_from_figure(gen_fig)
-            gt_grids = self._extract_grids_from_figure(gt_fig)
-            self._calculate_metrics(generation_grids, gt_grids)
+            if hasattr(gen_input, 'canvas'):
+                gen_grids = _extract_grids_from_figure(gen_input)
+            else:
+                gen_grids = self._deserialize_input(gen_input)
+            if hasattr(gt_input, 'canvas'):
+                gt_grids = _extract_grids_from_figure(gt_input)
+            else:
+                gt_grids = self._deserialize_input(gt_input)
+
+            self._calculate_metrics(gen_grids, gt_grids)
         except Exception as e:
             logger.error(f"Error during grid evaluation: {e}", exc_info=True)
             self.metrics.status = ExecutionStatus.FAILED
             self.metrics.error_message = str(e)
         return self.metrics
 
-    def _extract_grids_from_figure(self, fig: Figure) -> List[Dict[str, bool]]:
-        """
-        Extracts grid visibility status (X and Y) from all axes in a Figure object.
-        """
-        grids = []
-        for ax in fig.axes:
-            # Check if any grid line for a given axis is visible.
-            x_grid_visible = any(line.get_visible() for line in ax.get_xgridlines())
-            y_grid_visible = any(line.get_visible() for line in ax.get_ygridlines())
+    def _deserialize_input(self, input_data: List[Any]) -> List[GridConfig]:
+        if input_data and isinstance(input_data[0], GridConfig):
+            return input_data
+        deserialized = []
+        for item in input_data:
+            if isinstance(item, dict):
+                x_grid = GridStyle(**item.get('x_grid', {}))
+                y_grid = GridStyle(**item.get('y_grid', {}))
+                z_grid = GridStyle(**item.get('z_grid', {})) if item.get('z_grid') else None
+                deserialized.append(GridConfig(x_grid=x_grid, y_grid=y_grid, z_grid=z_grid))
+        return deserialized
+
+    def _style_match(self, s1: Optional[GridStyle], s2: Optional[GridStyle]) -> float:
+        if s1 is None and s2 is None: return 1.0
+        if s1 is None or s2 is None: return 0.0
+        
+        if s1.visible != s2.visible: return 0.0
+        if not s1.visible: return 1.0 
+        
+        score = 0.0
+        total_checks = 4
+
+        score += 1.0 if s1.color == s2.color else 0.0
+        score += 1.0 if s1.linestyle == s2.linestyle else 0.0
+        score += 1.0 if abs(s1.linewidth - s2.linewidth) < 0.1 else 0.0
+        
+        a1 = s1.alpha if s1.alpha is not None else 1.0
+        a2 = s2.alpha if s2.alpha is not None else 1.0
+        score += 1.0 if abs(a1 - a2) < 0.05 else 0.0
+        
+        return score / total_checks
+
+    def _calculate_metrics(self, gen_grids: List[GridConfig], gt_grids: List[GridConfig]) -> None:
+        if not gen_grids and not gt_grids:
+            self.metrics.precision = 1.0; self.metrics.recall = 1.0; self.metrics.f1 = 1.0
+            return
+        
+        if not gt_grids or not gen_grids:
+            self.metrics.precision = 0.0; self.metrics.recall = 0.0; self.metrics.f1 = 0.0
+            return
+        
+        total_score = 0.0
+        matched_gt_indices = set()
+        
+        for gen_cfg in gen_grids:
+            best_match_score = 0.0
+            best_match_idx = -1
             
-            # Only record axes that have at least one grid enabled.
-            if x_grid_visible or y_grid_visible:
-                grids.append({
-                    'x_grid_visible': x_grid_visible,
-                    'y_grid_visible': y_grid_visible
-                })
-        return grids
-
-    def _calculate_metrics(self, generation_grids: List[Dict], gt_grids: List[Dict]) -> None:
-        """
-        Calculates precision, recall, and F1 score by comparing the detected grids.
-        """
-        # Case 1: Both figures have no grids (perfect match).
-        if not generation_grids and not gt_grids:
-            self.metrics.precision = 1.0
-            self.metrics.recall = 1.0
-            self.metrics.f1 = 1.0
-            return
-
-        # Case 2: One has grids and the other doesn't (zero match).
-        if not gt_grids or not generation_grids:
-            self.metrics.precision = 0.0
-            self.metrics.recall = 0.0
-            self.metrics.f1 = 0.0
-            return
-
-        # Case 3: Both have grids; find the number of matching grid configurations.
-        n_correct = 0
-        gt_grids_copy = gt_grids.copy()
+            for i, gt_cfg in enumerate(gt_grids):
+                if i in matched_gt_indices: continue
+                x_sim = self._style_match(gen_cfg.x_grid, gt_cfg.x_grid)
+                y_sim = self._style_match(gen_cfg.y_grid, gt_cfg.y_grid)
+                
+                if gen_cfg.z_grid or gt_cfg.z_grid:
+                    z_sim = self._style_match(gen_cfg.z_grid, gt_cfg.z_grid)
+                    avg_sim = (x_sim + y_sim + z_sim) / 3.0
+                else:
+                    avg_sim = (x_sim + y_sim) / 2.0
+                
+                if avg_sim > best_match_score:
+                    best_match_score = avg_sim
+                    best_match_idx = i
+            
+            if best_match_idx != -1:
+                total_score += best_match_score
+                matched_gt_indices.add(best_match_idx)
         
-        for gen_grid in generation_grids:
-            if gen_grid in gt_grids_copy:
-                n_correct += 1
-                # Remove the matched grid to handle duplicates correctly.
-                gt_grids_copy.remove(gen_grid)
-        
-        self.metrics.precision = n_correct / len(generation_grids)
-        self.metrics.recall = n_correct / len(gt_grids)
+        self.metrics.precision = total_score / len(gen_grids) if gen_grids else 0.0
+        self.metrics.recall = total_score / len(gt_grids) if gt_grids else 0.0
         
         if self.metrics.precision + self.metrics.recall > 0:
             self.metrics.f1 = 2 * self.metrics.precision * self.metrics.recall / (self.metrics.precision + self.metrics.recall)
         else:
             self.metrics.f1 = 0.0
 
-# --- Main Workflow and Parallel Processing ---
-def process_single_file(file_name: str, generation_dir: Path, gt_dir: Path) -> Tuple[str, GridMetrics]:
-    """
-    Processes a single pair of generated and ground-truth scripts, returning the evaluation metrics.
-    """
-    logger.info(f"Processing: {file_name}...")
-    evaluator = GridEvaluator()
-    
-    gen_fig, gen_err = execute_code_and_get_figure(str(generation_dir / file_name))
-    gt_fig, gt_err = execute_code_and_get_figure(str(gt_dir / file_name))
-    
-    metrics = evaluator(gen_fig, gt_fig)
-    
-    # Consolidate execution errors with evaluation metrics.
-    if gen_err or gt_err:
-        if metrics.status == ExecutionStatus.SUCCESS:
-            metrics.status = ExecutionStatus.FAILED
-        if "timed out" in str(gen_err).lower() or "timed out" in str(gt_err).lower():
-            metrics.status = ExecutionStatus.TIMEOUT
-        metrics.error_message = f"GenErr: {gen_err}; GtErr: {gt_err}"
-        logger.warning(f"Failed to process {file_name}: {metrics.error_message}")
-    else:
-        logger.info(f"Finished {file_name} (P:{metrics.precision:.2f} R:{metrics.recall:.2f} F1:{metrics.f1:.2f})")
-    
-    return file_name, metrics
 
-def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: Optional[str] = None, num_workers: Optional[int] = None) -> Dict[str, GridMetrics]:
-    """
-    Evaluates all matching Python scripts in two directories in parallel.
-    """
-    generation_path = Path(generation_dir)
+def _worker_process(code_path: str, result_queue: multiprocessing.Queue):
+    try:
+        f = io.StringIO()
+        with redirect_stdout(f), redirect_stderr(f):
+            plt.close('all')
+            matplotlib.rc_file_defaults()
+            runpy.run_path(str(code_path), run_name='__main__')
+            
+            fig_nums = plt.get_fignums()
+            if not fig_nums:
+                result_queue.put({"status": "error", "msg": "No figure produced"})
+                return
+            
+            fig = plt.figure(fig_nums[-1])
+            grid_data = [asdict(g) for g in _extract_grids_from_figure(fig)]
+            result_queue.put({"status": "success", "data": grid_data})
+    except Exception as e:
+        result_queue.put({"status": "error", "msg": str(e)})
+    finally:
+        plt.close('all')
+        gc.collect()
+
+def execute_code_and_get_grids(code_file_path: str, timeout: int = 60):
+    if not os.path.exists(code_file_path): return None, "File not found"
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_worker_process, args=(code_file_path, q))
+    try:
+        p.start()
+        res = q.get(timeout=timeout)
+        p.join(timeout=1)
+        if res["status"] == "success": return res["data"], None
+        else: return None, res["msg"]
+    except queue.Empty:
+        p.terminate(); p.join()
+        return None, f"Execution timed out (> {timeout} seconds)"
+    except Exception as e:
+        if p.is_alive(): p.terminate()
+        return None, f"Executor error: {e}"
+
+def process_single_file_standalone(file_name: str, generation_dir: Path, gt_dir: Path):
+    evaluator = GridEvaluator()
+    gen_data, gen_err = execute_code_and_get_grids(str(generation_dir / file_name))
+    gt_data, gt_err = execute_code_and_get_grids(str(gt_dir / file_name))
+    
+    if gen_data is None or gt_data is None:
+        metrics = GridMetrics(status=ExecutionStatus.FAILED)
+        metrics.error_message = f"GenErr: {gen_err}; GtErr: {gt_err}"
+        return file_name, metrics
+    return file_name, evaluator(gen_data, gt_data)
+
+def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: str):
+    print(f"Running GridEvaluator in STANDALONE mode...")
+    gen_path = Path(generation_dir)
     gt_path = Path(gt_dir)
-    
-    common_files = sorted(list(set(f.name for f in generation_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
-    
-    if not common_files:
-        logger.warning("No matching file pairs found in the specified directories."); return {}
-        
-    if num_workers is None:
-        num_workers = os.cpu_count()
-        
-    logger.info(f"Found {len(common_files)} file pairs to process using {num_workers} workers.")
+    common_files = sorted(list(set(f.name for f in gen_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
     
     all_results = {}
-    
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        future_to_file = {executor.submit(process_single_file, fname, generation_path, gt_path): fname for fname in common_files}
+    with ProcessPoolExecutor() as executor:
+        future_to_file = {executor.submit(process_single_file_standalone, f, gen_path, gt_path): f for f in common_files}
         for future in as_completed(future_to_file):
-            file_name = future_to_file[future]
+            fname = future_to_file[future]
             try:
                 _, metrics = future.result()
-                all_results[file_name] = metrics
+                all_results[fname] = metrics
+                print(f"Processed {fname}: F1={metrics.f1:.2f}")
             except Exception as e:
-                logger.error(f"A critical error occurred while processing the future for {file_name}: {e}")
-                all_results[file_name] = GridMetrics(status=ExecutionStatus.FAILED, error_message=str(e))
-                
-    if output_file:
-        save_results_to_json(all_results, output_file)
-        
-    return all_results
+                print(f"Error {fname}: {e}")
+
+    save_results_to_json(all_results, output_file)
+
 
 def save_results_to_json(results: Dict[str, GridMetrics], output_file: str) -> None:
-    """Saves the aggregated evaluation results to a JSON file."""
-    json_data = {
-        "evaluation_info": {
-            "timestamp": datetime.now().isoformat(),
-            "evaluator": "GridEvaluator"
-        },
-        "individual_results": []
-    }
-    
+    json_data = {"evaluation_info": {"timestamp": datetime.now().isoformat(), "evaluator": "GridEvaluator_Robust"}, "individual_results": []}
     for file_name, metrics in sorted(results.items()):
         json_data["individual_results"].append({
-            "file": file_name,
-            "status": metrics.status.value,
-            "precision": round(metrics.precision, 4),
-            "recall": round(metrics.recall, 4),
-            "f1": round(metrics.f1, 4),
+            "file": file_name, "status": metrics.status.value,
+            "precision": round(metrics.precision, 4), "recall": round(metrics.recall, 4), "f1": round(metrics.f1, 4),
             "error_message": metrics.error_message
         })
-        
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
-    logger.info(f"Evaluation results saved to: {output_file}")
+    print(f"Evaluation results saved to: {output_file}")
 
-def main():
-    """Main entry point for the script."""
-    print("=" * 60)
-    print("Grid Evaluator")
-    
-    generation_dir = PROJECT_PATH / "generation_code"
-    gt_dir = PROJECT_PATH / "gt_code"
-    
-    if not generation_dir.exists() or not gt_dir.exists():
-        logger.error(f"Error: Please ensure 'generation_code' and 'gt_code' directories exist at: {PROJECT_PATH}")
-        return
-        
-    try:
-        results = batch_evaluate_directory(
-            generation_dir=str(generation_dir),
-            gt_dir=str(gt_dir),
-            output_file=str(PROJECT_PATH / "grid_evaluation_results.json"),
-            num_workers=os.cpu_count()
-        )
-        
-        if results:
-            print("\n" + "=" * 25 + " Evaluation Summary " + "=" * 25)
-            status_counts = Counter(m.status.value for m in results.values())
-            total = len(results)
-            print(f"Total files evaluated: {total}")
-            for status, count in status_counts.items():
-                print(f"  - {status.capitalize():<10}: {count:4d} files ({count/total:.1%})")
-            print("=" * 60)
-        else:
-            print("\nNo files were evaluated.")
-            
-    except Exception as e:
-        logger.error(f"Batch evaluation failed: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    main()
-
-
+    if sys.platform != 'linux':
+        multiprocessing.set_start_method('spawn', force=True)
+    
+    gen_dir = PROJECT_PATH / "generation_code"
+    gt_dir = PROJECT_PATH / "gt_code"
+    if gen_dir.exists():
+        batch_evaluate_directory(str(gen_dir), str(gt_dir), "grid_standalone.json")
