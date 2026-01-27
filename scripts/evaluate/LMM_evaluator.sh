@@ -1,20 +1,13 @@
 #!/bin/bash
-
+# ==============================================================================
+#                               LMM Evaluation
+# ==============================================================================
 set -euo pipefail
 
 # --- 1. API Key Configuration ---
 API_KEY_POOL=(
-    "sk-ufdY8FFZfcjbYQDaaEFiRJria9NrUi0EvgH5MXP8Rdrb4NYA"
-    "sk-icxuQRwrff8RP84c8e1nZnPpdsi7b3jkoNbIBPFJgLRfN9xu"
-    "sk-flxDa8eq9IIOxcijZPJg6ThAbCJTYDLAfgxkxhxovwyITvyD"
-    "sk-omkqSEw1IzM2URDbgkJiDKNlHDWoHYjlvujfFRXDBxp9GAPL"
-    "sk-EZIqC9wazhWCbYD6lFcWgnsRXLjY1kW0PJf5gdCgFbrnR3Zf"
-    "sk-FXsQmEoQ9EIOmc2HKMO9s2zcXw1ggsBGMv3HTeuOLfM9nEo8"
-    "sk-5CtfUq3XjqAmORwiw5XhCR1KBSdGYym7xxHHBP10MYYb8yls"
-    "sk-8xEYAGUUzD5AjRCM7Wqv6FTLDyKOiOcBhGysKaovExiayavJ"
-    "sk-gkpvxg3Xe3aE0iWk3wh0e26oymDE5hffRxdbBEFsQ215yqNx"
-    "sk-Cnb9opeQuiPJ6vXFAyXvqvcJRBbAhLoiI3NP0dGrYHcSXxU1"
-    "sk-jQdvqjWp6ng59FpdIIuZX8LuyDAa82ZMQQaWOvuFE3Oczn1D"
+    "sk-ufdY8FFZfcjbYQDaaEFiRASDklsadcjn21H5MXP8Rdrb4NYA"
+    "sk-icxuQRwrff8RP84c8e1nZnPpdasdadsd3w221KdJgLRfN9xu"
 )
 
 API_MODEL_NAME="gpt-5-mini"
@@ -91,7 +84,7 @@ generate_task_list() {
 }
 
 echo "Discovering tasks and building job queue..."
-: > "$JOB_LIST_FILE" # 清空/创建任务文件
+: > "$JOB_LIST_FILE" 
 
 for INPUT_PATH in "${DEFAULT_EXECUTE_RESULTS_DIR}"; do
     if [ -d "$INPUT_PATH" ]; then
