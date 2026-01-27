@@ -107,21 +107,11 @@ def classify_error(error_message: str) -> str:
     return 'code_error'
 
 def process_single_script(script_path: Path, output_dir: Path, font_path: str):
-    """
-    Processes a single script in a separate subprocess.
-    This is the target function for the ThreadPoolExecutor.
-    """
-    # Use the parent directory name as a prefix to create unique temporary file names.
-    # This prevents conflicts if multiple scripts have the same name (e.g., 'main.py').
     prefix = script_path.parent.name
     temp_script_name = f"{prefix}_{script_path.name}"
     temp_image_stem = f"{prefix}_{script_path.stem}"
-    
-    # Define temporary paths for processing. Files will be moved to final paths only on success.
     temp_script_path = output_dir / temp_script_name
     temp_image_path = (output_dir / f"{temp_image_stem}.png").resolve()
-    
-    # Define final destination paths.
     final_script_path = output_dir / script_path.name
     final_image_path = output_dir / f"{script_path.stem}.png"
 
@@ -166,7 +156,6 @@ def main():
 
     start_time = datetime.now()
 
-    # --- Font File Detection ---
     script_dir = Path(__file__).parent.resolve()
     font_file = script_dir / "SimHei.ttf"
     font_path = "None"
@@ -178,7 +167,7 @@ def main():
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_file = output_dir / "execute_report.json"
+    report_file = output_dir / "_execute_report.json"
     
     scripts_to_run = [Path(f) for f in args.script_files]
     total_scripts = len(scripts_to_run)
@@ -217,7 +206,6 @@ def main():
                     errors_info.append(error_detail)
                     
                     if error_type == 'environment_error':
-                        # --- NEW FEATURE: Log environment errors for immediate visibility ---
                         logger.info(f"Detected ENVIRONMENT ERROR for script: {script_name}")
                         environment_errors.append(error_detail)
                     else:
@@ -230,22 +218,18 @@ def main():
     
     logger.info("--- Phase 1 processing complete ---")
 
-    # --- Phase 2: Move and overwrite files ---
     logger.info(f"--- Phase 2: Renaming {len(rename_tasks)} successful file pairs ---")
     for task in rename_tasks:
         shutil.move(str(task["temp_script"]), str(task["final_script"]))
         shutil.move(str(task["temp_image"]), str(task["final_image"]))
     logger.info("--- Phase 2 renaming complete ---")
 
-    # Calculate final statistics
     success_count = len(rename_tasks)
     error_count = len(errors_info)
     pass_rate = (success_count / total_scripts * 100) if total_scripts > 0 else 0
     
     end_time = datetime.now()
     execution_time = (end_time - start_time).total_seconds()
-
-    # --- ROBUSTNESS ENHANCEMENT: Reordered JSON report for better readability ---
     report = {
         "execution_summary": {
             "execution_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -285,3 +269,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
