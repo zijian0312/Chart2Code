@@ -1,21 +1,24 @@
 # text_evaluator.py
-from typing import List, Tuple, Any, Dict, Optional
+from typing import List, Tuple, Any, Dict, Optional, Union
 from dotenv import load_dotenv
 import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
 import logging
 import json
 from datetime import datetime
-import runpy
 from enum import Enum
 import io
-from contextlib import redirect_stdout
-from collections import Counter
+import multiprocessing
+import queue
+import gc
+import runpy
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import redirect_stdout, redirect_stderr
 
-# --- Core Dependencies & Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -25,146 +28,120 @@ sys.path.insert(0, str(PROJECT_PATH))
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from Levenshtein import ratio as levenshtein_ratio
 
-# For stricter text comparison, install the library: pip install python-Levenshtein
-try:
-    from Levenshtein import ratio as levenshtein_ratio
-except ImportError:
-    logger.warning("python-Levenshtein not found. Using basic string comparison. For stricter evaluation, run 'pip install python-Levenshtein'")
-    def levenshtein_ratio(s1, s2):
-        return 1.0 if s1 == s2 else 0.0
 
-# --- Status & Data Classes ---
 class ExecutionStatus(Enum):
-    """Enumeration for the execution status of a script."""
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
 
 @dataclass
 class TextMetrics:
-    """Dataclass to hold text evaluation metrics."""
     precision: float = 0.0
     recall: float = 0.0
     f1: float = 0.0
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     error_message: str = ""
 
-# --- Timeout-Protected & Output-Suppressed Code Executor ---
-def _execute_code_runner(code_file_path: str) -> Tuple[bool, Optional[str]]:
-    """Runs code in an isolated process to check for errors, suppressing all stdout."""
-    import runpy, matplotlib, io
-    from contextlib import redirect_stdout
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    
-    # Disable interactive plotting and close all figures to ensure a clean state.
-    plt.show = plt.savefig = lambda *args, **kwargs: None
-    plt.close('all')
-    
-    output_buffer = io.StringIO()
-    try:
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        return True, None
-    except Exception as e:
-        return False, f"Error during code execution: {e}"
-    finally:
-        plt.close('all')
+def _extract_texts_from_figure(fig: Figure) -> Dict[str, List[Dict[str, Any]]]:
 
-def execute_code_and_get_figure(code_file_path: str, timeout: int = 60) -> Tuple[Optional[plt.Figure], Optional[str]]:
-    """Executes plotting code with a timeout and returns the generated Figure object."""
-    with ProcessPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_execute_code_runner, code_file_path)
+    texts = {
+        "title": [], "xlabel": [], "ylabel": [], "tick_label": [],
+        "suptitle": [], "legend_text": [], "annotation": [], "offset_text": []
+    }
+
+    try:
+        fig.canvas.draw()
+    except Exception as e:
+        logger.debug(f"Canvas draw warning: {e}")
+
+    inv_fig_trans = fig.transFigure.inverted()
+
+    def _get_item(txt_obj) -> Optional[Dict[str, Any]]:
         try:
-            success, error_msg = future.result(timeout=timeout)
-            if not success:
-                return None, error_msg
-        except TimeoutError:
-            return None, f"Code execution timed out (> {timeout} seconds)"
-        except Exception as e:
-            return None, f"Executor encountered an unknown error: {e}"
+            content = txt_obj.get_text()
+            if content and content.strip():
+                try:
+                    transform = txt_obj.get_transform()
+                    pos_pixels = transform.transform(txt_obj.get_position())
+                    pos_norm = inv_fig_trans.transform(pos_pixels)
+                except Exception:
 
-    plt.close('all')
-    
+                    pos_norm = np.array([0.0, 0.0])
 
-    output_buffer = io.StringIO()
+                return {'text': content.strip(), 'pos': pos_norm}
+        except Exception:
+            pass
+        return None
+
     try:
-        with redirect_stdout(output_buffer):
-            runpy.run_path(str(code_file_path), run_name='__main__')
-        
-        fig_nums = plt.get_fignums()
-        if not fig_nums:
-            return None, "Code executed successfully but did not generate any Figure"
-        return plt.figure(fig_nums[-1]), None
+        if hasattr(fig, '_suptitle') and fig._suptitle:
+            if item := _get_item(fig._suptitle): texts["suptitle"].append(item)
+
+        for ax in fig.axes:
+            if item := _get_item(ax.title): texts["title"].append(item)
+            if item := _get_item(ax.xaxis.label): texts["xlabel"].append(item)
+            if item := _get_item(ax.yaxis.label): texts["ylabel"].append(item)
+            if hasattr(ax, 'zaxis'): 
+                if item := _get_item(ax.zaxis.label): texts["ylabel"].append(item) 
+            try:
+                if item := _get_item(ax.xaxis.get_offset_text()): texts["offset_text"].append(item)
+                if item := _get_item(ax.yaxis.get_offset_text()): texts["offset_text"].append(item)
+            except: pass
+            try:
+                for label in ax.get_xticklabels() + ax.get_yticklabels():
+                    if item := _get_item(label): texts["tick_label"].append(item)
+                if hasattr(ax, 'get_zticklabels'): 
+                    for label in ax.get_zticklabels():
+                        if item := _get_item(label): texts["tick_label"].append(item)
+            except: pass
+            if legend := ax.get_legend():
+                for text_obj in legend.get_texts():
+                    if item := _get_item(text_obj): texts["legend_text"].append(item)
+
+            for text_obj in ax.texts:
+                if item := _get_item(text_obj): texts["annotation"].append(item)
+    
     except Exception as e:
-        return None, f"Error while capturing Figure object: {e}"
-    finally:
-        plt.close('all')
+        logger.error(f"Error traversing figure texts: {e}")
+
+    return {k: v for k, v in texts.items() if v}
 
 
-# --- Hardened Evaluator Class with Strict Logic ---
 class TextEvaluator:
-    """Evaluates text similarity between two matplotlib Figure objects."""
     def __init__(self) -> None:
         self.metrics = TextMetrics()
 
-    def __call__(self, gen_fig: Optional[plt.Figure], gt_fig: Optional[plt.Figure]) -> TextMetrics:
-        """Evaluates the text of a generated figure against a ground truth figure."""
-        if gen_fig is None or gt_fig is None:
+    def __call__(self, gen_input: Any, gt_input: Any) -> TextMetrics:
+
+        if gen_input is None or gt_input is None:
             self.metrics.status = ExecutionStatus.FAILED
-            self.metrics.error_message = "Could not get a valid Figure object for comparison."
+            self.metrics.error_message = "Invalid input (None)"
             return self.metrics
+        
         try:
-            generation_texts = self._extract_texts_from_figure(gen_fig)
-            gt_texts = self._extract_texts_from_figure(gt_fig)
-            self._calculate_metrics(generation_texts, gt_texts)
+            if hasattr(gen_input, 'canvas'): 
+                gen_texts = _extract_texts_from_figure(gen_input)
+            else:
+                gen_texts = gen_input 
+            if hasattr(gt_input, 'canvas'):
+                gt_texts = _extract_texts_from_figure(gt_input)
+            else:
+                gt_texts = gt_input
+
+            self._calculate_metrics(gen_texts, gt_texts)
         except Exception as e:
             logger.error(f"Error during text evaluation: {e}", exc_info=True)
             self.metrics.status = ExecutionStatus.FAILED
             self.metrics.error_message = str(e)
         return self.metrics
 
-    def _extract_texts_from_figure(self, fig: plt.Figure) -> Dict[str, List[str]]:
-        """Extracts and categorizes all text elements from a matplotlib Figure."""
-        texts = {
-            "title": [], "xlabel": [], "ylabel": [], "tick_label": [],
-            "suptitle": [], "legend_text": [], "annotation": []
-        }
-        if fig._suptitle and fig._suptitle.get_text():
-            texts["suptitle"].append(fig._suptitle.get_text())
+    def _calculate_metrics(self, generation_texts: Dict[str, List[Dict]], gt_texts: Dict[str, List[Dict]]) -> None:
 
-        for ax in fig.axes:
-            if ax.title.get_text():
-                texts["title"].append(ax.title.get_text())
-            if ax.xaxis.label.get_text():
-                texts["xlabel"].append(ax.xaxis.label.get_text())
-            if ax.yaxis.label.get_text():
-                texts["ylabel"].append(ax.yaxis.label.get_text())
-            
-            for label in ax.get_xticklabels() + ax.get_yticklabels():
-                if label.get_text():
-                    texts["tick_label"].append(label.get_text())
-            
-            if legend := ax.get_legend():
-                for text in legend.get_texts():
-                    if text.get_text():
-                        texts["legend_text"].append(text.get_text())
-            
-            # For text generated by ax.text() or ax.annotate()
-            for text in ax.texts:
-                if text.get_text():
-                    texts["annotation"].append(text.get_text())
-        
-        # Remove categories with no text elements.
-        return {k: v for k, v in texts.items() if v}
-
-    def _calculate_metrics(self, generation_texts: Dict[str, List[str]], gt_texts: Dict[str, List[str]]) -> None:
-        """Calculates precision, recall, and F1 based on categorized text similarity."""
         if not generation_texts and not gt_texts:
-            self.metrics.precision = 1.0
-            self.metrics.recall = 1.0
-            self.metrics.f1 = 1.0
+            self.metrics.precision = 1.0; self.metrics.recall = 1.0; self.metrics.f1 = 1.0
             return
 
         total_similarity_score = 0.0
@@ -179,22 +156,37 @@ class TextEvaluator:
             
             if not gt_list or not gen_list:
                 continue
+            
+            n_gt = len(gt_list)
+            n_gen = len(gen_list)
+            cost_matrix = np.ones((n_gt, n_gen)) 
 
-            # Match generated texts to ground truth texts within the same category.
-            unmatched_gt = gt_list[:]
-            for gen_text in gen_list:
-                if not unmatched_gt: break
-                best_score = -1
-                best_match_index = -1
-                for i, gt_text in enumerate(unmatched_gt):
-                    score = levenshtein_ratio(gen_text, gt_text)
-                    if score > best_score:
-                        best_score = score
-                        best_match_index = i
-                
-                if best_match_index != -1:
-                    total_similarity_score += best_score
-                    unmatched_gt.pop(best_match_index)
+            for i, gt_item in enumerate(gt_list):
+                for j, gen_item in enumerate(gen_list):
+                    gt_txt = gt_item['text']
+                    gen_txt = gen_item['text']
+
+                    text_sim = levenshtein_ratio(gen_txt, gt_txt)
+                    final_score = text_sim
+                    if category == 'annotation' and text_sim > 0.8:
+                        gt_pos = np.array(gt_item['pos'])
+                        gen_pos = np.array(gen_item['pos'])
+
+                        dist = np.linalg.norm(gen_pos - gt_pos)
+                        
+                        pos_sim = np.exp(- (dist**2) / (2 * (0.2**2)))
+                        
+                        final_score = 0.7 * text_sim + 0.3 * pos_sim
+                    cost_matrix[i, j] = 1.0 - final_score
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            current_category_score = 0.0
+            for r, c in zip(row_ind, col_ind):
+
+                score = 1.0 - cost_matrix[r, c]
+                current_category_score += score
+            
+            total_similarity_score += current_category_score
 
         self.metrics.precision = total_similarity_score / total_gen_text_count if total_gen_text_count > 0 else 1.0 if not gt_texts else 0.0
         self.metrics.recall = total_similarity_score / total_gt_text_count if total_gt_text_count > 0 else 1.0 if not generation_texts else 0.0
@@ -204,117 +196,101 @@ class TextEvaluator:
         else:
             self.metrics.f1 = 0.0
 
-# --- Main Flow & Parallel Processing ---
-def process_single_file(file_name: str, generation_dir: Path, gt_dir: Path) -> Tuple[str, TextMetrics]:
-    """Processes a single pair of generated and ground truth code files."""
-    logger.info(f"[{file_name}] Starting processing...")
-    evaluator = TextEvaluator()
-    gen_fig, gen_err = execute_code_and_get_figure(str(generation_dir / file_name))
-    gt_fig, gt_err = execute_code_and_get_figure(str(gt_dir / file_name))
-    
-    metrics = evaluator(gen_fig, gt_fig)
-    
-    # Combine errors from execution and evaluation for a complete report.
-    if gen_err or gt_err:
-        if metrics.status == ExecutionStatus.SUCCESS: metrics.status = ExecutionStatus.FAILED
-        if "timed out" in str(gen_err) or "timed out" in str(gt_err): metrics.status = ExecutionStatus.TIMEOUT
-        metrics.error_message = f"GenErr: {gen_err}; GtErr: {gt_err}"
-        logger.warning(f"[{file_name}] Processing failed: {metrics.error_message}")
-    else:
-        logger.info(f"[{file_name}] Processing successful (P:{metrics.precision:.2f} R:{metrics.recall:.2f} F1:{metrics.f1:.2f})")
-    return file_name, metrics
 
-def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: Optional[str] = None, num_workers: Optional[int] = None) -> Dict[str, TextMetrics]:
-    """Evaluates all matching Python files in two directories in parallel."""
-    generation_path = Path(generation_dir)
+def _worker_process(code_path: str, result_queue: multiprocessing.Queue):
+    try:
+        f = io.StringIO()
+        with redirect_stdout(f), redirect_stderr(f):
+            plt.close('all')
+            matplotlib.rc_file_defaults()
+            runpy.run_path(str(code_path), run_name='__main__')
+            
+            fig_nums = plt.get_fignums()
+            if not fig_nums:
+                result_queue.put({"status": "error", "msg": "No figure produced"})
+                return
+            
+            fig = plt.figure(fig_nums[-1])
+            text_data = _extract_texts_from_figure(fig)
+            result_queue.put({"status": "success", "data": text_data})
+    except Exception as e:
+        result_queue.put({"status": "error", "msg": str(e)})
+    finally:
+        plt.close('all')
+        gc.collect()
+
+def execute_code_and_get_texts(code_file_path: str, timeout: int = 60):
+    if not os.path.exists(code_file_path): return None, "File not found"
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_worker_process, args=(code_file_path, q))
+    try:
+        p.start()
+        res = q.get(timeout=timeout)
+        p.join(timeout=1)
+        if res["status"] == "success": return res["data"], None
+        else: return None, res["msg"]
+    except queue.Empty:
+        p.terminate(); p.join()
+        return None, f"Execution timed out (> {timeout} seconds)"
+    except Exception as e:
+        if p.is_alive(): p.terminate()
+        return None, f"Executor error: {e}"
+
+def process_single_file_standalone(file_name: str, generation_dir: Path, gt_dir: Path):
+    evaluator = TextEvaluator()
+    gen_data, gen_err = execute_code_and_get_texts(str(generation_dir / file_name))
+    gt_data, gt_err = execute_code_and_get_texts(str(gt_dir / file_name))
+    
+    if gen_data is None or gt_data is None:
+        metrics = TextMetrics(status=ExecutionStatus.FAILED)
+        metrics.error_message = f"GenErr: {gen_err}; GtErr: {gt_err}"
+        return file_name, metrics
+    
+    return file_name, evaluator(gen_data, gt_data)
+
+def batch_evaluate_directory(generation_dir: str, gt_dir: str, output_file: str):
+    print(f"Running TextEvaluator in STANDALONE mode...")
+    gen_path = Path(generation_dir)
     gt_path = Path(gt_dir)
-    common_files = sorted(list(set(f.name for f in generation_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
+    common_files = sorted(list(set(f.name for f in gen_path.glob("*.py")) & set(f.name for f in gt_path.glob("*.py"))))
     
-    if not common_files:
-        logger.warning("No matching file pairs found between the two directories.")
-        return {}
-    if num_workers is None: 
-        num_workers = os.cpu_count()
-        
-    logger.info(f"Found {len(common_files)} file pairs to process using {num_workers} workers.")
     all_results = {}
-    
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        future_to_file = {executor.submit(process_single_file, fname, generation_path, gt_path): fname for fname in common_files}
+    with ProcessPoolExecutor() as executor:
+        future_to_file = {executor.submit(process_single_file_standalone, f, gen_path, gt_path): f for f in common_files}
         for future in as_completed(future_to_file):
-            file_name = future_to_file[future]
+            fname = future_to_file[future]
             try:
                 _, metrics = future.result()
-                all_results[file_name] = metrics
+                all_results[fname] = metrics
+                # Simple progress log
+                if len(all_results) % 10 == 0:
+                    print(f"Processed {len(all_results)}/{len(common_files)} files...")
             except Exception as e:
-                logger.error(f"A critical error occurred while processing the future for {file_name}: {e}")
-                all_results[file_name] = TextMetrics(status=ExecutionStatus.FAILED, error_message=str(e))
-                
-    if output_file:
-        save_results_to_json(all_results, output_file)
-        
-    return all_results
+                print(f"Error {fname}: {e}")
+
+    save_results_to_json(all_results, output_file)
+
 
 def save_results_to_json(results: Dict[str, TextMetrics], output_file: str) -> None:
-    """Saves the evaluation results to a JSON file."""
-    json_data = {
-        "evaluation_info": {
-            "timestamp": datetime.now().isoformat(), 
-            "evaluator": "TextEvaluator"
-        },
-        "individual_results": []
-    }
-    
+    json_data = {"evaluation_info": {"timestamp": datetime.now().isoformat(), "evaluator": "TextEvaluator_Robust"}, "individual_results": []}
     for file_name, metrics in sorted(results.items()):
         json_data["individual_results"].append({
-            "file": file_name, 
-            "status": metrics.status.value,
-            "precision": round(metrics.precision, 4), 
-            "recall": round(metrics.recall, 4), 
-            "f1": round(metrics.f1, 4),
+            "file": file_name, "status": metrics.status.value,
+            "precision": round(metrics.precision, 4), "recall": round(metrics.recall, 4), "f1": round(metrics.f1, 4),
             "error_message": metrics.error_message
         })
-        
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
-    logger.info(f"Evaluation results saved to: {output_file}")
+    print(f"Saved to: {output_file}")
 
-def main():
-    """Main entry point for the script."""
-    print("=" * 60)
-    print("Text-Based Plot Evaluation")
-    print("=" * 60)
-    
-    # Define directories for generated code and ground truth code.
-    generation_dir = PROJECT_PATH / "generation_code"
-    gt_dir = PROJECT_PATH / "gt_code"
-    
-    if not generation_dir.exists() or not gt_dir.exists():
-        logger.error(f"Error: Please ensure 'generation_code' and 'gt_code' directories exist at: {PROJECT_PATH}")
-        return
-        
-    try:
-        results = batch_evaluate_directory(
-            generation_dir=str(generation_dir),
-            gt_dir=str(gt_dir),
-            output_file=str(PROJECT_PATH / "text_evaluation_results.json"),
-            num_workers=os.cpu_count()
-        )
-        
-        if results:
-            print("\n" + "=" * 22 + " Evaluation Summary " + "=" * 22)
-            status_counts = Counter(m.status.value for m in results.values())
-            total = len(results)
-            print(f"Total files evaluated: {total}")
-            for status, count in status_counts.items():
-                print(f"  - {status.capitalize():<10}: {count:4d} files ({count/total:.1%})")
-            print("=" * 60)
-            
-    except Exception as e:
-        logger.error(f"Batch evaluation failed due to a critical error: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    main()
-
-
+    if sys.platform != 'linux':
+        multiprocessing.set_start_method('spawn', force=True)
+    
+    gen_dir = PROJECT_PATH / "generation_code"
+    gt_dir = PROJECT_PATH / "gt_code"
+    output_path = PROJECT_PATH / "text_evaluation_results.json"
+    
+    if gen_dir.exists():
+        batch_evaluate_directory(str(gen_dir), str(gt_dir), str(output_path))
