@@ -41,7 +41,7 @@ fi
 DEFAULT_EXECUTE_RESULTS_DIR="${PROJECT_ROOT_DIR}/Evaluation/execute_results"
 GT_JSONS_DIR="${PROJECT_ROOT_DIR}/data"
 EVALUATION_RESULTS_DIR="${PROJECT_ROOT_DIR}/Evaluation/evaluation_results"
-PYTHON_EVALUATOR_SCRIPT_FULLPATH="${PROJECT_ROOT_DIR}/Evaluation/srcs2/LLM_evaluator.py"
+PYTHON_EVALUATOR_SCRIPT_FULLPATH="${PROJECT_ROOT_DIR}/Evaluation/srcs/LLM_evaluator.py"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$EVALUATION_RESULTS_DIR/_logs"
 
