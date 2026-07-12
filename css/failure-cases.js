@@ -290,7 +290,7 @@
                           "kind":  "error",
                           "groundTruth":  "data1/data/level1_direct/combination_61.png",
                           "output":  "data1/data/qwen3_direct_30B/combination_61.png",
-                          "analysis":  "The y闂佺偨鍎查崣顪緄s range in the model output on the right is problematic, causing part of the data to be invisible. This indicates an insufficient match between the axis range and the data. Additionally, errors occurred in data recognition and analysis."
+                          "analysis":  "The y-axis range in the model output on the right is problematic, causing part of the data to be invisible. This indicates an insufficient match between the axis range and the data. Additionally, errors occurred in data recognition and analysis."
                       },
                       {
                           "title":  "Case 2: contour_2.png",
@@ -310,7 +310,7 @@
                           "kind":  "error",
                           "groundTruth":  "data1/data/level1_direct/area_11.png",
                           "output":  "data1/data/claude_direct/area_11.png",
-                          "analysis":  "The y闂佺偨鍎查崣顪緄s range in the model output on the right is problematic, causing part of the data to be invisible. This indicates an insufficient match between the axis range and the data. Additionally, errors occurred in data recognition and analysis."
+                          "analysis":  "The y-axis range in the model output on the right is problematic, causing part of the data to be invisible. This indicates an insufficient match between the axis range and the data. Additionally, errors occurred in data recognition and analysis."
                       },
                       {
                           "title":  "Case 4: area_1_v2.png",
@@ -320,7 +320,7 @@
                           "kind":  "error",
                           "groundTruth":  "data1/data/level2/area_1_v2.png",
                           "output":  "data1/data/gpt_5.2_level2/area_1_v2.png",
-                          "analysis":  "In the generated chart, the Y-axis range of the left subplot is incorrectly compressed to 0.53闂?.76, and the legend is misplaced over the data area, both of which severely distort the data representation and visual clarity compared to the ground truth."
+                          "analysis":  "In the generated chart, the Y-axis range of the left subplot is incorrectly compressed to 0.53-0.76, and the legend is misplaced over the data area, both of which severely distort the data representation and visual clarity compared to the ground truth."
                       },
                       {
                           "title":  "Case 5: bar_1_v3.png",
@@ -330,7 +330,7 @@
                           "kind":  "error",
                           "groundTruth":  "data1/data/level2/bar_1_v3.png",
                           "output":  "data1/data/gpt_5.2_level2/bar_1_v3.png",
-                          "analysis":  "In the model-generated chart, the y-axis range is incorrectly set to 0闂?.5, which is narrower than the 0闂? range in the ground truth, resulting in the upper portion of the stacked area chart being truncated. Additionally, the leftmost segment of the chart is missing. These issues indicate deficiencies in the model\u0027s data extraction capability and its ability to accurately infer the underlying numerical scale."
+                          "analysis":  "In the model-generated chart, the y-axis range is incorrectly set to 0-0.5, which is narrower than the 0-1 range in the ground truth, resulting in the upper portion of the stacked area chart being truncated. Additionally, the leftmost segment of the chart is missing. These issues indicate deficiencies in the model\u0027s data extraction capability and its ability to accurately infer the underlying numerical scale."
                       }
                   ]
     },
@@ -564,7 +564,7 @@
                           "kind":  "error",
                           "groundTruth":  "data1/data/level2/bar_14_v3.png",
                           "output":  "data1/data/qwen2.5_level2_72B/bar_14_v3.png",
-                          "analysis":  "The transparency in the left plot of the model output on the right is inconsistent with that of the GT Figure. Additionally, the legend style differs闂佺偨鍎查弫鍒猠 GT Figure uses a dashed line, while the model output uses a solid line. Furthermore, the text bolding also deviates from the GT Figure."
+                          "analysis":  "The transparency in the left plot of the model output on the right is inconsistent with that of the GT Figure. Additionally, the legend style differs - the GT Figure uses a dashed line, while the model output uses a solid line. Furthermore, the text bolding also deviates from the GT Figure."
                       },
                       {
                           "title":  "Case 2: bar_17_v1.png",
@@ -746,7 +746,7 @@
                           "kind":  "specific",
                           "groundTruth":  "data1/data_specific/level2/scatter_31_v5.png",
                           "output":  "data1/data_specific/claude_level2/scatter_31_v5.png",
-                          "analysis":  "The highly complex compound plotting instructions闂佺偨鍎查弫淇uiring an inset chart, a Pareto front line, custom markers, and text annotations闂佺偨鍎查弨绱噀rwhelmed the model\u0027s execution capacity, resulting in unimplemented key features (e.g., missing lines and text labels) and partial data loss (e.g., the categorical X-axis being erroneously replaced by arbitrary numerical values)."
+                          "analysis":  "The highly complex compound plotting instructions - requiring an inset chart, a Pareto front line, custom markers, and text annotations - overwhelmed the model\u0027s execution capacity, resulting in unimplemented key features (e.g., missing lines and text labels) and partial data loss (e.g., the categorical X-axis being erroneously replaced by arbitrary numerical values)."
                       },
                       {
                           "title":  "Case 3: combination_33_v5.png",
@@ -756,7 +756,7 @@
                           "kind":  "specific",
                           "groundTruth":  "data1/data_specific/level2/combination_33_v5.png",
                           "output":  "data1/data_specific/seed_1.6_level2/combination_33_v5.png",
-                          "analysis":  "As illustrated by the calibration dashboard, the highly complex composite instructions闂佺偨鍎查弫濯搃ch demand cross-plot axis sharing, and data-conditional annotations闂佺偨鍎查弨绱噀rwhelm the model\u0027s logical reasoning and multi-task scheduling capacities; this not only causes a complete collapse of structural layout constraints but also leads to the total omission of crucial analytical visual elements, such as the maximum error highlight."
+                          "analysis":  "As illustrated by the calibration dashboard, the highly complex composite instructions - which demand cross-plot axis sharing, and data-conditional annotations - overwhelm the model\u0027s logical reasoning and multi-task scheduling capacities; this not only causes a complete collapse of structural layout constraints but also leads to the total omission of crucial analytical visual elements, such as the maximum error highlight."
                       },
                       {
                           "title":  "Case 4: combination_33_v3.png",
@@ -796,7 +796,7 @@
                           "kind":  "specific",
                           "groundTruth":  "data1/data_specific/level3/table43_5_generate.png",
                           "output":  "data1/data_specific/claude_level3/table43_5_generate.png",
-                          "analysis":  "In the generated bubble chart, the model suffered from severe multi-dimensional mapping failure when processing complex data (X, Y, bubble size, and color), not only erroneously altering the linear axis to a logarithmic scale闂佺偨鍎查弨顩噓sing extreme distortion in data distribution闂佺偨鍎查弨顦泃 also completely losing the continuous color mapping."
+                          "analysis":  "In the generated bubble chart, the model suffered from severe multi-dimensional mapping failure when processing complex data (X, Y, bubble size, and color), not only erroneously altering the linear axis to a logarithmic scale, causing extreme distortion in data distribution, but also completely losing the continuous color mapping."
                       },
                       {
                           "title":  "Case 8: table3_3_generate.png",
@@ -967,9 +967,12 @@
           images.appendChild(box);
         });
 
-        const analysis = el('p', 'failure-analysis');
-        analysis.innerHTML = `<strong>Analysis:</strong> ${escapeHtml(item.analysis)}`;
-        card.append(header, images, analysis);
+        card.append(header, images);
+        if (item.kind !== 'good' && item.analysis.trim()) {
+          const analysis = el('p', 'failure-analysis');
+          analysis.innerHTML = `<strong>Analysis:</strong> ${escapeHtml(item.analysis)}`;
+          card.appendChild(analysis);
+        }
         grid.appendChild(card);
       });
     }
