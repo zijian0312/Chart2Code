@@ -868,7 +868,7 @@
 
     const intro = el('div', 'failure-intro');
     const copy = el('div', 'failure-copy');
-    copy.innerHTML = '<p class="failure-kicker">Failure Case Analysis</p><h2 class="failure-title">Qualitative breakdown of model chart generation behavior</h2><p class="failure-description">This gallery adds detailed case-level analysis to the Chart2Code project page while preserving the original benchmark content. Use the category tabs, level filters, and search box to inspect common errors, successful generations, and task-specific observations.</p>';
+    copy.innerHTML = '<p class="failure-kicker">Failure Case Analysis</p><h2 class="failure-title">Failure Case Analysis of Chart-to-Code Generation</h2><p class="failure-description">We present representative success and failure cases from Chart2Code, organized by case type and task level. This gallery highlights where current multimodal models struggle, where they generate faithful charts, and how their behavior changes across challenging chart reproduction, editing, and long-table generation scenarios.</p>';
     const stats = el('div', 'failure-stats');
     [[allCases.length, 'Total cases'], [errorCount, 'Common errors'], [goodCount, 'Good cases'], [specificCount, 'Specific cases']].forEach(([value, label]) => {
       const stat = el('div', 'failure-stat');
