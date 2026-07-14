@@ -23,7 +23,7 @@ body {
     padding-bottom: 15px;
 }
 
-/* 主容器：负责定位、字体和光效 */
+/* 涓诲鍣細璐熻矗瀹氫綅銆佸瓧浣撳拰鍏夋晥 */
 .chart2code-title {
     font-family: 'Lobster', cursive;
     font-size: 80px;
@@ -40,7 +40,7 @@ body {
     height: 80px; 
     width: auto; /* Ensures the width scales to maintain aspect ratio */
 }
-/* 为标题的每个部分应用“双重动画”，并设置更平滑的默认速度 */
+/* 涓烘爣棰樼殑姣忎釜閮ㄥ垎搴旂敤鈥滃弻閲嶅姩鐢烩€濓紝骞惰缃洿骞虫粦鐨勯粯璁ら€熷害 */
 .word-chart, .word-2, .word-code {
     display: inline-block;
     -webkit-background-clip: text;
@@ -48,14 +48,14 @@ body {
     color: transparent;
     background-size: 400% 400%;
     
-    /* 动画1：渐变色内部流动 | 动画2：整体颜色循环变化 */
-    /* 关键改动：将动画速度放慢，效果更优雅 */
+    /* 鍔ㄧ敾1锛氭笎鍙樿壊鍐呴儴娴佸姩 | 鍔ㄧ敾2锛氭暣浣撻鑹插惊鐜彉鍖?*/
+    /* 鍏抽敭鏀瑰姩锛氬皢鍔ㄧ敾閫熷害鏀炬參锛屾晥鏋滄洿浼橀泤 */
     animation: 
         gradient-flow 12s ease-in-out infinite,
         hue-cycle 10s linear infinite;
 }
 
-/* 第一部分 "Chart" 的专属颜色：更丰富的冷色调 */
+/* 绗竴閮ㄥ垎 "Chart" 鐨勪笓灞為鑹诧細鏇翠赴瀵岀殑鍐疯壊璋?*/
 .word-chart {
     background-image: linear-gradient(
         60deg, 
@@ -68,11 +68,11 @@ body {
         #9b59b6, /* Amethyst */
         #0047AB  /* Cobalt Blue (to create a seamless loop) */
     );
-    /* 为每个部分设置不同的动画时长，增加视觉复杂性 */
+    /* 涓烘瘡涓儴鍒嗚缃笉鍚岀殑鍔ㄧ敾鏃堕暱锛屽鍔犺瑙夊鏉傛€?*/
     animation-duration: 1s, 2s;
 }
 
-/* 中间部分 "2" 的专属颜色：更精致的高亮色 */
+/* 涓棿閮ㄥ垎 "2" 鐨勪笓灞為鑹诧細鏇寸簿鑷寸殑楂樹寒鑹?*/
 .word-2 {
     background-image: linear-gradient(
         60deg, 
@@ -85,11 +85,11 @@ body {
         #ced1d4, /* Light Silver */
         #FFFFFF  /* White (for seamless loop) */
     );
-    /* 渐变流动更快，但颜色循环最慢，形成对比 */
+    /* 娓愬彉娴佸姩鏇村揩锛屼絾棰滆壊寰幆鏈€鎱紝褰㈡垚瀵规瘮 */
     animation-duration: 2s, 3s;
 }
 
-/* 第三部分 "Code" 的专属颜色：更丰富的暖色调 */
+/* 绗笁閮ㄥ垎 "Code" 鐨勪笓灞為鑹诧細鏇翠赴瀵岀殑鏆栬壊璋?*/
 .word-code {
     background-image: linear-gradient(
         60deg, 
@@ -106,7 +106,7 @@ body {
 }
 
 
-/* 创建扫光效果的覆盖层 (保持不变) */
+/* 鍒涘缓鎵厜鏁堟灉鐨勮鐩栧眰 (淇濇寔涓嶅彉) */
 .chart2code-title::before {
     content: '';
     position: absolute;
@@ -122,11 +122,11 @@ body {
         rgba(255, 255, 255, 0.05) 60%,
         rgba(255, 255, 255, 0) 100%
     );
-    animation: shine-effect 5s linear infinite; /* 扫光也稍微放慢一点 */
+    animation: shine-effect 5s linear infinite; /* 鎵厜涔熺◢寰斁鎱竴鐐?*/
     z-index: 2;
 }
 
-/* === 动画定义 (Keyframes) === */
+/* === 鍔ㄧ敾瀹氫箟 (Keyframes) === */
 
 @keyframes gradient-flow {
     0% { background-position: 0% 50%; }
@@ -145,36 +145,36 @@ body {
 }
 /* leaderboard.css */
 .subtitle {
-    font-family: 'Inter', sans-serif; /* 使用您选择的 Inter 字体 */
+    font-family: 'Inter', sans-serif; /* 浣跨敤鎮ㄩ€夋嫨鐨?Inter 瀛椾綋 */
     color: #2F4F4F;
     text-align: center;
-    font-size: 38px;      /* Inter 字体结构清晰，这个尺寸效果很好 */
-    font-weight: 500;     /* 500 是一个理想的 Medium 粗细 */
+    font-size: 38px;      /* Inter 瀛椾綋缁撴瀯娓呮櫚锛岃繖涓昂瀵告晥鏋滃緢濂?*/
+    font-weight: 500;     /* 500 鏄竴涓悊鎯崇殑 Medium 绮楃粏 */
     margin-top: -1.2em;
     line-height: 1.5;
-    letter-spacing: -0.5px; /* Inter 字体在较大尺寸下稍微收紧字间距会更美观 */
+    letter-spacing: -0.5px; /* Inter 瀛椾綋鍦ㄨ緝澶у昂瀵镐笅绋嶅井鏀剁揣瀛楅棿璺濅細鏇寸編瑙?*/
 }
 .authors {
-    font-family: 'Playfair Display', serif; /* 替换 'Raleway' */
-    font-size: 22px; /* 建议稍微增大字号以突出细节 */
-    font-weight: 500; /* Medium weight 看起来更清晰 */
+    font-family: 'Playfair Display', serif; /* 鏇挎崲 'Raleway' */
+    font-size: 22px; /* 寤鸿绋嶅井澧炲ぇ瀛楀彿浠ョ獊鍑虹粏鑺?*/
+    font-weight: 500; /* Medium weight 鐪嬭捣鏉ユ洿娓呮櫚 */
     margin-top: 3.5em;
     text-align: center;
     color: #2F4F4F;
 }
 .authors a {
-    color: inherit; /* 继承 .authors 定义的 #2F4F4F 颜色 */
-    text-decoration: none; /* 移除默认的下划线 */
-    transition: color 0.3s ease; /* 添加一个平滑的颜色过渡效果 */
+    color: inherit; /* 缁ф壙 .authors 瀹氫箟鐨?#2F4F4F 棰滆壊 */
+    text-decoration: none; /* 绉婚櫎榛樿鐨勪笅鍒掔嚎 */
+    transition: color 0.3s ease; /* 娣诲姞涓€涓钩婊戠殑棰滆壊杩囨浮鏁堟灉 */
 }
 
-/* 鼠标悬停时的作者链接样式 */
+/* 榧犳爣鎮仠鏃剁殑浣滆€呴摼鎺ユ牱寮?*/
 .authors a:hover {
-    color: #0056b3; /* 鼠标悬停时变为深蓝色，与你的表格标题颜色呼应 */
-    text-decoration: underline; /* 鼠标悬停时显示下划线，作为可点击的视觉提示 */
+    color: #0056b3; /* 榧犳爣鎮仠鏃跺彉涓烘繁钃濊壊锛屼笌浣犵殑琛ㄦ牸鏍囬棰滆壊鍛煎簲 */
+    text-decoration: underline; /* 榧犳爣鎮仠鏃舵樉绀轰笅鍒掔嚎锛屼綔涓哄彲鐐瑰嚮鐨勮瑙夋彁绀?*/
 }
 .affiliations {
-    font-family: 'Lora', serif; /* 经典的衬线正文字体 */
+    font-family: 'Lora', serif; /* 缁忓吀鐨勮‖绾挎鏂囧瓧浣?*/
     font-size: 20px;
     margin-top: 1em;
     font-style: italic;
@@ -189,12 +189,12 @@ body {
 /* --- Main Content & Image Styles --- */
 .text-title {
     font-family: 'Montserrat', sans-serif;
-    font-size: 32px;      /* 增大字号，使其成为视觉焦点 */
-    font-weight: 700;     /* 使用 Bold 粗细增加冲击力 */
+    font-size: 32px;      /* 澧炲ぇ瀛楀彿锛屼娇鍏舵垚涓鸿瑙夌劍鐐?*/
+    font-weight: 700;     /* 浣跨敤 Bold 绮楃粏澧炲姞鍐插嚮鍔?*/
     color: #333;
     text-align: center;
     margin-bottom: 0.5em;
-    letter-spacing: -0.5px; /* 微调字间距，更显精致 */
+    letter-spacing: -0.5px; /* 寰皟瀛楅棿璺濓紝鏇存樉绮捐嚧 */
 }
 
 .text-content {
@@ -375,4 +375,73 @@ table.sortable-table {
     height: 3em;
     padding-top: 0.5em;
     padding-right: 1em;
+}
+
+/* --- Header typography polish: keep the Chart2Code logo, refine surrounding text --- */
+.subtitle,
+.authors,
+.affiliations {
+    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+}
+
+.subtitle {
+    position: static;
+    top: auto;
+    left: auto;
+    color: #0f172a;
+    font-size: 32px;
+    font-weight: 800;
+    line-height: 1.22;
+    letter-spacing: 0;
+    margin-top: 0.1em;
+    max-width: none;
+    white-space: nowrap;
+}
+
+.subtitle-gradient {
+    display: inline-block;
+    background: linear-gradient(90deg, #1597d3 0%, #27c47f 55%, #17a2b8 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.authors {
+    color: #111827;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.28;
+    margin-top: 0.95em;
+}
+
+.affiliations {
+    color: #1f3f3f;
+    font-size: 18px;
+    font-weight: 500;
+    font-style: italic;
+    line-height: 1.4;
+    margin-top: 0.85em;
+}
+
+.button-group {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.35em 1.1em;
+    margin-top: 1.2em;
+}
+
+@media (max-width: 1180px) {
+    .subtitle {
+        font-size: 29px;
+        white-space: normal;
+        max-width: 960px;
+    }
+}
+
+button.outline,
+.failure-link-button {
+    font-family: "Google Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px;
+    font-weight: 650;
 }
