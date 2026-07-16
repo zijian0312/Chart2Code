@@ -8,7 +8,7 @@ body {
 }
 
 .title-section {
-    background: white;
+    background: linear-gradient(90deg, rgba(0, 201, 255, 0.20) 0%, rgba(146, 254, 157, 0.24) 100%);
     background-blend-mode: multiply;
 }
 
@@ -388,7 +388,7 @@ table.sortable-table {
     position: static;
     top: auto;
     left: auto;
-    color: #0f172a;
+    color: #2F4F4F;
     font-size: 32px;
     font-weight: 800;
     line-height: 1.22;
@@ -400,14 +400,14 @@ table.sortable-table {
 
 .subtitle-gradient {
     display: inline-block;
-    background: linear-gradient(90deg, #1597d3 0%, #27c47f 55%, #17a2b8 100%);
+    background: linear-gradient(90deg, #00A8E8 0%, #28C985 58%, #2F4F4F 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
 }
 
 .authors {
-    color: #111827;
+    color: #2F4F4F;
     font-size: 22px;
     font-weight: 700;
     line-height: 1.28;
@@ -415,7 +415,7 @@ table.sortable-table {
 }
 
 .affiliations {
-    color: #1f3f3f;
+    color: #2F4F4F;
     font-size: 18px;
     font-weight: 500;
     font-style: italic;
@@ -444,4 +444,13 @@ button.outline,
     font-family: "Google Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
     font-size: 17px;
     font-weight: 650;
+    color: #2F4F4F;
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow: 0 8px 18px rgba(47, 79, 79, 0.10);
+}
+
+button.outline:hover,
+.failure-link-button:hover {
+    color: #0089c7;
+    background: #ffffff;
 }
