@@ -8,7 +8,7 @@ body {
 }
 
 .title-section {
-    background: linear-gradient(90deg, rgba(0, 201, 255, 0.20) 0%, rgba(146, 254, 157, 0.24) 100%);
+    background: linear-gradient(90deg, rgba(0, 201, 255, 0.34) 0%, rgba(146, 254, 157, 0.42) 100%);
     background-blend-mode: multiply;
 }
 
@@ -380,17 +380,18 @@ table.sortable-table {
 /* --- Header typography polish: keep the Chart2Code logo, refine surrounding text --- */
 .subtitle,
 .authors,
-.affiliations {
-    font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+.affiliations,
+.conference-badge {
+    font-family: "Google Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
 }
 
 .subtitle {
     position: static;
     top: auto;
     left: auto;
-    color: #2F4F4F;
+    color: #3b3b3b;
     font-size: 32px;
-    font-weight: 800;
+    font-weight: 400;
     line-height: 1.22;
     letter-spacing: 0;
     margin-top: 0.1em;
@@ -400,16 +401,17 @@ table.sortable-table {
 
 .subtitle-gradient {
     display: inline-block;
-    background: linear-gradient(90deg, #00A8E8 0%, #28C985 58%, #2F4F4F 100%);
+    background: linear-gradient(90deg, #008FE8 0%, #00C9FF 34%, #28C985 72%, #12A36A 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+    font-weight: 700;
 }
 
 .authors {
     color: #2F4F4F;
     font-size: 22px;
-    font-weight: 700;
+    font-weight: 400;
     line-height: 1.28;
     margin-top: 0.95em;
 }
@@ -418,9 +420,18 @@ table.sortable-table {
     color: #2F4F4F;
     font-size: 18px;
     font-weight: 500;
-    font-style: italic;
+    font-style: normal;
     line-height: 1.4;
     margin-top: 0.85em;
+}
+
+.conference-badge {
+    color: #d71920;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-top: 0.55em;
+    text-align: center;
 }
 
 .button-group {
